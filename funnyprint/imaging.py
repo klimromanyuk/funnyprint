@@ -502,3 +502,150 @@ def prepare_pdf_page(path, page_num=0, brightness=0, contrast=0,
     gray = img.convert("L")
     bw = dither_image(gray, dither)
     return pil_to_funny_lines(bw), bw
+
+
+# ════════════════════════════════════════
+#  QR / Barcode
+# ════════════════════════════════════════
+
+def generate_qr(data, size=None, add_text=False, font_path=None,
+                font_size=16):
+    import qrcode
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=qrcode.constants.ERROR_CORRECT_M,
+        box_size=10, border=2)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+
+    # QR всегда по ширине принтера
+    qr_size = PRINTER_WIDTH - 16
+    img = img.resize((qr_size, qr_size), Image.NEAREST)
+
+    if add_text and data:
+        font = load_font(font_path, font_size)
+        max_tw = PRINTER_WIDTH - 16
+        dummy_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+
+        # Переносим длинный текст
+        wrapped = []
+        current = ""
+        for ch in data:
+            test = current + ch
+            bbox = dummy_draw.textbbox((0, 0), test, font=font)
+            if bbox[2] > max_tw and current:
+                wrapped.append(current)
+                current = ch
+            else:
+                current = test
+        if current:
+            wrapped.append(current)
+
+        line_h = font_size + 4
+        text_h = line_h * len(wrapped) + 8
+        combined = Image.new("RGB",
+            (PRINTER_WIDTH, qr_size + text_h + 8),
+            (255, 255, 255))
+        combined.paste(img, ((PRINTER_WIDTH - qr_size) // 2, 4))
+        d = ImageDraw.Draw(combined)
+        y = qr_size + 8
+        for line in wrapped:
+            bbox = d.textbbox((0, 0), line, font=font)
+            tw = bbox[2] - bbox[0]
+            d.text(((PRINTER_WIDTH - tw) // 2, y),
+                   line, font=font, fill=(0, 0, 0))
+            y += line_h
+        img = combined
+    else:
+        # Центрируем QR на белом фоне
+        combined = Image.new("RGB", (PRINTER_WIDTH, qr_size + 8),
+                             (255, 255, 255))
+        combined.paste(img, ((PRINTER_WIDTH - qr_size) // 2, 4))
+        img = combined
+
+    return img
+
+def generate_barcode(data, barcode_type="code128", add_text=True):
+    import barcode as bc
+    from barcode.writer import ImageWriter
+
+    try:
+        code_class = bc.get_barcode_class(barcode_type)
+    except bc.errors.BarcodeNotFoundError:
+        code_class = bc.get_barcode_class("code128")
+
+    # Валидация: убираем невалидные символы
+    valid = ""
+    for ch in data:
+        if ord(ch) < 128:
+            valid += ch
+    if not valid:
+        raise ValueError("Штрих-код поддерживает только латиницу и цифры")
+
+    writer = ImageWriter()
+    code = code_class(valid, writer=writer)
+
+    from io import BytesIO
+    buf = BytesIO()
+    code.write(buf, options={
+        "module_width": 0.4,
+        "module_height": 25,
+        "font_size": 0,
+        "text_distance": 0,
+        "quiet_zone": 2,
+        "write_text": False,
+    })
+    buf.seek(0)
+    img = Image.open(buf).convert("RGB")
+
+    if add_text:
+        font = load_font(None, 32)
+        draw_dummy = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        bbox = draw_dummy.textbbox((0, 0), valid, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+
+        combined = Image.new("RGB",
+            (max(img.width, tw + 16), img.height + th + 12),
+            (255, 255, 255))
+        combined.paste(img, (0, 0))
+        d = ImageDraw.Draw(combined)
+        d.text(((combined.width - tw) // 2, img.height + 6),
+               valid, font=font, fill=(0, 0, 0))
+        img = combined
+
+    return img
+
+
+BARCODE_TYPES = [
+    "code128", "code39", "ean13", "ean8", "upca",
+    "isbn13", "isbn10", "issn", "pzn",
+]
+
+
+def prepare_qr(data, add_text=False, font_path=None, font_size=16,
+               brightness=0, contrast=0, sharpness=0,
+               dither="Floyd-Steinberg", rotation=0):
+    img = generate_qr(data, add_text=add_text,
+                      font_path=font_path, font_size=font_size)
+    if rotation:
+        img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
+    img = _fit_to_printer(img)
+    img = apply_filters(img, brightness, contrast, sharpness)
+    gray = img.convert("L")
+    bw = dither_image(gray, dither)
+    return pil_to_funny_lines(bw), bw
+
+
+def prepare_barcode(data, barcode_type="code128", add_text=True,
+                    brightness=0, contrast=0, sharpness=0,
+                    dither="Floyd-Steinberg", rotation=0):
+    img = generate_barcode(data, barcode_type, add_text)
+    if rotation:
+        img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
+    img = _trim_whitespace(img)
+    img = _fit_to_printer(img)
+    img = apply_filters(img, brightness, contrast, sharpness)
+    gray = img.convert("L")
+    bw = dither_image(gray, dither)
+    return pil_to_funny_lines(bw), bw

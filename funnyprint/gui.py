@@ -244,14 +244,6 @@ class App:
         self.text_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
         self.text_widget.insert("1.0", "Привет мир!")
         self.text_widget.bind("<KeyRelease>", lambda e: self._schedule())
-        self.text_widget.bind("<Control-z>",
-            lambda e: self.text_widget.edit_undo() or "break")
-        self.text_widget.bind("<Control-Z>",
-            lambda e: self.text_widget.edit_undo() or "break")
-        self.text_widget.bind("<Control-y>",
-            lambda e: self.text_widget.edit_redo() or "break")
-        self.text_widget.bind("<Control-Y>",
-            lambda e: self.text_widget.edit_redo() or "break")
 
         ff = ttk.Frame(txt_tab)
         ff.pack(fill=tk.X, pady=2)
@@ -313,6 +305,47 @@ class App:
                         command=self._on_strip_toggle).pack(side=tk.LEFT)
         self.strip_info_lbl = ttk.Label(stf, text="", foreground="gray")
         self.strip_info_lbl.pack(side=tk.LEFT, padx=10)
+
+        # -- QR --
+        qr_tab = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(qr_tab, text="   QR   ")
+
+        ttk.Label(qr_tab, text="Данные:").pack(anchor=tk.W)
+        self.qr_entry = tk.Text(qr_tab, height=3, width=30,
+                                wrap=tk.WORD, font=("Arial", 11))
+        self.qr_entry.pack(fill=tk.X, pady=(0, 5))
+        self.qr_entry.insert("1.0", "https://example.com")
+        self.qr_entry.bind("<KeyRelease>", lambda e: self._schedule())
+        
+        self.qr_text_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(qr_tab, text="Добавить текст под QR",
+                        variable=self.qr_text_var,
+                        command=self._schedule).pack(anchor=tk.W, pady=2)
+
+        # -- Barcode --
+        bc_tab = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(bc_tab, text="   Barcode   ")
+
+        ttk.Label(bc_tab, text="Данные:").pack(anchor=tk.W)
+        self.bc_entry = ttk.Entry(bc_tab, font=("Arial", 11))
+        self.bc_entry.pack(fill=tk.X, pady=(0, 5))
+        self.bc_entry.insert(0, "123456789012")
+        self.bc_entry.bind("<KeyRelease>", lambda e: self._schedule())
+        
+        bc_type_f = ttk.Frame(bc_tab)
+        bc_type_f.pack(fill=tk.X, pady=2)
+        ttk.Label(bc_type_f, text="Тип:").pack(side=tk.LEFT)
+        self.bc_type_var = tk.StringVar(value="code128")
+        from funnyprint.imaging import BARCODE_TYPES
+        ttk.Combobox(bc_type_f, values=BARCODE_TYPES,
+                     textvariable=self.bc_type_var,
+                     state="readonly", width=12).pack(side=tk.LEFT, padx=5)
+        self.bc_type_var.trace_add("write", lambda *a: self._schedule())
+
+        self.bc_text_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bc_tab, text="Показать текст",
+                        variable=self.bc_text_var,
+                        command=self._schedule).pack(anchor=tk.W, pady=2)
 
         # ── Настройки (под вкладками, не внутри) ──
         sett = ttk.LabelFrame(left, text="Настройки печати", padding=5)
@@ -444,8 +477,9 @@ class App:
 
         # ── Глобальное колёсико ──
         self.root.bind_all("<MouseWheel>", self._on_global_wheel)
-        self.root.bind_all("<Control-v>", self._on_paste)
-        self.root.bind_all("<Control-V>", self._on_paste)
+
+        # ── Горячие клавиши для любой раскладки ──
+        self.root.bind_all("<Key>", self._on_global_key)
 
         self.root.after(500, self._update_preview)
 
@@ -468,7 +502,7 @@ class App:
                   ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
 
     # ══════════════════════════════════
-    #  Колёсико / Ctrl+V
+    #  Колёсико + Ctrl+Key
     # ══════════════════════════════════
     def _is_over(self, widget, x, y):
         try:
@@ -477,6 +511,86 @@ class App:
                     and wy <= y <= wy + widget.winfo_height())
         except Exception:
             return False
+
+    def _on_global_key(self, event):
+        """Обработка Ctrl+клавиша в любой раскладке"""
+        if not (event.state & 0x4):  # Ctrl не нажат
+            return
+
+        ch = event.char
+        w = event.widget
+
+        # Ctrl+A — выделить всё
+        if ch == '\x01':
+            if isinstance(w, (tk.Text,)):
+                w.tag_add("sel", "1.0", "end")
+                return "break"
+            if isinstance(w, (ttk.Entry, tk.Entry)):
+                w.selection_range(0, tk.END)
+                return "break"
+
+        # Ctrl+C — копировать
+        if ch == '\x03':
+            if isinstance(w, (tk.Text,)):
+                try:
+                    w.event_generate("<<Copy>>")
+                except Exception:
+                    pass
+                return "break"
+            if isinstance(w, (ttk.Entry, tk.Entry)):
+                try:
+                    w.event_generate("<<Copy>>")
+                except Exception:
+                    pass
+                return "break"
+
+        # Ctrl+V — вставить
+        if ch == '\x16':
+            if isinstance(w, (tk.Text,)):
+                try:
+                    w.event_generate("<<Paste>>")
+                except Exception:
+                    pass
+                return "break"
+            if isinstance(w, (ttk.Entry, tk.Entry)):
+                try:
+                    w.event_generate("<<Paste>>")
+                except Exception:
+                    pass
+                return "break"
+
+        # Ctrl+X — вырезать
+        if ch == '\x18':
+            if isinstance(w, (tk.Text,)):
+                try:
+                    w.event_generate("<<Cut>>")
+                except Exception:
+                    pass
+                return "break"
+            if isinstance(w, (ttk.Entry, tk.Entry)):
+                try:
+                    w.event_generate("<<Cut>>")
+                except Exception:
+                    pass
+                return "break"
+
+        # Ctrl+Z — отмена
+        if ch == '\x1a':
+            if isinstance(w, tk.Text) and w.cget("undo"):
+                try:
+                    w.edit_undo()
+                except Exception:
+                    pass
+                return "break"
+
+        # Ctrl+Y — повтор
+        if ch == '\x19':
+            if isinstance(w, tk.Text) and w.cget("undo"):
+                try:
+                    w.edit_redo()
+                except Exception:
+                    pass
+                return "break"
 
     def _on_global_wheel(self, event):
         if isinstance(event.widget, (tk.Text, tk.Listbox)):
@@ -491,11 +605,6 @@ class App:
             else:
                 self.canvas.yview_scroll(d, "units")
             return "break"
-
-    def _on_paste(self, event):
-        if isinstance(event.widget, tk.Text):
-            return
-        return "break"
 
     # ══════════════════════════════════
     #  Предпросмотр
@@ -575,6 +684,35 @@ class App:
                 self.will_print_lbl.config(
                     text=f"Напечатается: текст [{fn}]{mode}")
 
+            elif tab == 3:  # QR
+                data = self.qr_entry.get("1.0", tk.END).strip()
+                if not data:
+                    self.canvas.delete("all")
+                    self.size_lbl.config(text="")
+                    self.current_lines = None
+                    self.will_print_lbl.config(
+                        text="Напечатается: [введи данные QR]")
+                    return
+                from funnyprint.imaging import prepare_qr
+                lines, preview = prepare_qr(
+                    data, add_text=self.qr_text_var.get(), **flt)
+                self.will_print_lbl.config(text="Напечатается: QR-код")
+
+            elif tab == 4:  # Barcode
+                data = self.bc_entry.get().strip()
+                if not data:
+                    self.canvas.delete("all")
+                    self.size_lbl.config(text="")
+                    self.current_lines = None
+                    self.will_print_lbl.config(
+                        text="Напечатается: [введи данные штрих-кода]")
+                    return
+                from funnyprint.imaging import prepare_barcode
+                lines, preview = prepare_barcode(
+                    data, barcode_type=self.bc_type_var.get(),
+                    add_text=self.bc_text_var.get(), **flt)
+                self.will_print_lbl.config(text="Напечатается: штрих-код")
+
             else:
                 return
 
@@ -582,6 +720,10 @@ class App:
             self.current_preview = preview
             self._show_preview(preview)
 
+        except ValueError as e:
+            self.log(f"Ошибка данных: {e}")
+            self.canvas.delete("all")
+            self.current_lines = None
         except Exception as e:
             self.log(f"Ошибка предпросмотра: {e}")
 
