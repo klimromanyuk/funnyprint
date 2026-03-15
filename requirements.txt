@@ -4,3 +4,4 @@ python-dotenv>=1.0.0
 PyMuPDF>=1.23.0
 qrcode[pil]>=7.4
 python-barcode>=0.15.0
+tkinterdnd2>=0.3.0

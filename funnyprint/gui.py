@@ -59,7 +59,13 @@ class PrintButton(tk.Canvas):
 
 class App:
     def __init__(self):
-        self.root = tk.Tk()
+        try:
+            from tkinterdnd2 import TkinterDnD
+            self.root = TkinterDnD.Tk()
+            self._dnd_available = True
+        except ImportError:
+            self.root = tk.Tk()
+            self._dnd_available = False
         self.root.title("FunnyPrint LX-D2")
         self.root.geometry("960x780")
         self.root.minsize(700, 500)
@@ -482,6 +488,11 @@ class App:
         self.root.bind_all("<Key>", self._on_global_key)
 
         self.root.after(500, self._update_preview)
+        # Drag & Drop
+        if self._dnd_available:
+            from tkinterdnd2 import DND_FILES
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind('<<Drop>>', self._on_drop)
 
     def _slider(self, parent, label, from_, to, default, var_name,
                 is_int=False):
@@ -779,6 +790,31 @@ class App:
         for name in self.font_names:
             if q in name.lower():
                 self.font_listbox.insert(tk.END, name)
+
+    def _on_drop(self, event):
+        path = event.data.strip('{}').strip('"')
+        ext = os.path.splitext(path)[1].lower()
+
+        if ext == ".pdf":
+            from funnyprint.imaging import get_pdf_page_count
+            self.pdf_path = path
+            self.pdf_page_count = get_pdf_page_count(path)
+            self.pdf_lbl.config(
+                text=os.path.basename(path), foreground="black")
+            self.pdf_page_spin.config(to=self.pdf_page_count)
+            self.pdf_pages_lbl.config(text=f"/ {self.pdf_page_count}")
+            self.pdf_page_var.set(1)
+            self.tabs.select(1)  # PDF tab
+            self.log(f"PDF (drop): {os.path.basename(path)}")
+
+        elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"):
+            self.image_path = path
+            self.file_lbl.config(
+                text=os.path.basename(path), foreground="black")
+            self.tabs.select(0)  # Image tab
+            self.log(f"Картинка (drop): {os.path.basename(path)}")
+
+        self._update_preview()
 
     def on_load_image(self):
         path = filedialog.askopenfilename(
