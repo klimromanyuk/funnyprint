@@ -466,3 +466,39 @@ def _prepare_strip(text, font, font_size, line_h, pad, stroke,
 
 def get_strip_info(font_size):
     return PRINTER_WIDTH // (font_size + 6)
+
+
+# ════════════════════════════════════════
+#  PDF
+# ════════════════════════════════════════
+
+def get_pdf_page_count(path):
+    import fitz
+    doc = fitz.open(path)
+    count = len(doc)
+    doc.close()
+    return count
+
+
+def prepare_pdf_page(path, page_num=0, brightness=0, contrast=0,
+                     sharpness=0, dither="Floyd-Steinberg", rotation=0):
+    """Рендерит одну страницу PDF → (funny_lines, preview)"""
+    import fitz
+    doc = fitz.open(path)
+    page = doc[page_num]
+
+    # Рендерим с высоким DPI для качества
+    zoom = PRINTER_WIDTH / page.rect.width * 2
+    mat = fitz.Matrix(zoom, zoom)
+    pix = page.get_pixmap(matrix=mat)
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    doc.close()
+
+    if rotation:
+        img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
+
+    img = _fit_to_printer(img)
+    img = apply_filters(img, brightness, contrast, sharpness)
+    gray = img.convert("L")
+    bw = dither_image(gray, dither)
+    return pil_to_funny_lines(bw), bw

@@ -209,6 +209,31 @@ class App:
                                   wraplength=260, foreground="gray")
         self.file_lbl.pack(pady=2)
 
+        # -- PDF --
+        pdf_tab = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(pdf_tab, text="   PDF   ")
+        ttk.Button(pdf_tab, text="Выбрать PDF",
+                   command=self.on_load_pdf).pack(fill=tk.X, pady=5)
+        self.pdf_lbl = ttk.Label(pdf_tab, text="PDF не выбран",
+                                 wraplength=260, foreground="gray")
+        self.pdf_lbl.pack(pady=2)
+
+        pg_f = ttk.Frame(pdf_tab)
+        pg_f.pack(fill=tk.X, pady=5)
+        ttk.Label(pg_f, text="Страница:").pack(side=tk.LEFT)
+        self.pdf_page_var = tk.IntVar(value=1)
+        self.pdf_page_spin = ttk.Spinbox(
+            pg_f, from_=1, to=1, width=4,
+            textvariable=self.pdf_page_var,
+            command=self._schedule)
+        self.pdf_page_spin.pack(side=tk.LEFT, padx=5)
+        self.pdf_page_spin.bind("<KeyRelease>", lambda e: self._schedule())
+        self.pdf_pages_lbl = ttk.Label(pg_f, text="/ 1")
+        self.pdf_pages_lbl.pack(side=tk.LEFT)
+
+        self.pdf_path = None
+        self.pdf_page_count = 0
+
         # -- Текст --
         txt_tab = ttk.Frame(self.tabs, padding=8)
         self.tabs.add(txt_tab, text="   Текст   ")
@@ -498,7 +523,7 @@ class App:
             rotation=int(self.rotation_var.get()),
         )
         try:
-            if tab == 0:
+            if tab == 0:  # Картинка
                 if not self.image_path:
                     self.canvas.delete("all")
                     self.size_lbl.config(text="")
@@ -509,7 +534,24 @@ class App:
                 lines, preview = prepare_image(self.image_path, **flt)
                 self.will_print_lbl.config(
                     text=f"Напечатается: {os.path.basename(self.image_path)}")
-            else:
+
+            elif tab == 1:  # PDF
+                if not self.pdf_path:
+                    self.canvas.delete("all")
+                    self.size_lbl.config(text="")
+                    self.current_lines = None
+                    self.will_print_lbl.config(
+                        text="Напечатается: [выбери PDF]")
+                    return
+                from funnyprint.imaging import prepare_pdf_page
+                pg = max(0, self.pdf_page_var.get() - 1)
+                lines, preview = prepare_pdf_page(
+                    self.pdf_path, page_num=pg, **flt)
+                self.will_print_lbl.config(
+                    text=f"Напечатается: {os.path.basename(self.pdf_path)}"
+                         f" стр.{pg + 1}")
+
+            elif tab == 2:  # Текст
                 text = self.text_widget.get("1.0", tk.END).strip()
                 if not text:
                     self.canvas.delete("all")
@@ -532,9 +574,14 @@ class App:
                 mode = " (лента)" if self.strip_var.get() else ""
                 self.will_print_lbl.config(
                     text=f"Напечатается: текст [{fn}]{mode}")
+
+            else:
+                return
+
             self.current_lines = lines
             self.current_preview = preview
             self._show_preview(preview)
+
         except Exception as e:
             self.log(f"Ошибка предпросмотра: {e}")
 
@@ -601,6 +648,23 @@ class App:
         self.image_path = path
         self.file_lbl.config(text=os.path.basename(path), foreground="black")
         self.log(f"Загружено: {os.path.basename(path)}")
+        self._update_preview()
+    
+    def on_load_pdf(self):
+        path = filedialog.askopenfilename(
+            title="Выбери PDF",
+            filetypes=[("PDF", "*.pdf"), ("Все файлы", "*.*")])
+        if not path:
+            return
+        from funnyprint.imaging import get_pdf_page_count
+        self.pdf_path = path
+        self.pdf_page_count = get_pdf_page_count(path)
+        self.pdf_lbl.config(
+            text=os.path.basename(path), foreground="black")
+        self.pdf_page_spin.config(to=self.pdf_page_count)
+        self.pdf_pages_lbl.config(text=f"/ {self.pdf_page_count}")
+        self.pdf_page_var.set(1)
+        self.log(f"PDF: {os.path.basename(path)}, {self.pdf_page_count} стр.")
         self._update_preview()
 
     # ══════════════════════════════════
