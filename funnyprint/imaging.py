@@ -303,7 +303,12 @@ def prepare_image(path, brightness=0, contrast=0, sharpness=0,
     if rotation:
         img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
 
-    img = _fit_to_printer(img)
+    # Всегда масштабируем по ширине принтера
+    w, h = img.size
+    new_h = max(2, int(h * PRINTER_WIDTH / w))
+    if new_h % 2:
+        new_h += 1
+    img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
     img = apply_filters(img, brightness, contrast, sharpness)
     gray = img.convert("L")
     bw = dither_image(gray, dither)
@@ -649,3 +654,99 @@ def prepare_barcode(data, barcode_type="code128", add_text=True,
     gray = img.convert("L")
     bw = dither_image(gray, dither)
     return pil_to_funny_lines(bw), bw
+
+
+def add_feed_preview(img_1bit, feed_px):
+    """Добавляет белое пространство внизу для визуализации промотки"""
+    if feed_px <= 0:
+        return img_1bit
+    w, h = img_1bit.size
+    new_h = h + feed_px
+    if new_h % 2:
+        new_h += 1
+    result = Image.new("1", (w, new_h), color=1)  # белый
+    result.paste(img_1bit, (0, 0))
+    return result
+
+
+def prepare_batch_images(paths, brightness=0, contrast=0, sharpness=0,
+                         dither="Floyd-Steinberg", rotation=0, feed_between=50):
+    """Несколько картинок → одна длинная + funny_lines"""
+    images_bw = []
+    for path in paths:
+        img = Image.open(path)
+        if img.mode in ("RGBA", "LA", "PA"):
+            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            img = bg.convert("RGB")
+        elif img.mode != "RGB":
+            img = img.convert("RGB")
+        if rotation:
+            img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
+        # Всегда масштабируем по ширине принтера
+        w, h = img.size
+        new_h = max(2, int(h * PRINTER_WIDTH / w))
+        if new_h % 2:
+            new_h += 1
+        img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
+        img = apply_filters(img, brightness, contrast, sharpness)
+        gray = img.convert("L")
+        bw = dither_image(gray, dither)
+        images_bw.append(bw)
+
+    # Склеиваем в одну длинную картинку с промотками между ними
+    total_h = sum(im.height for im in images_bw)
+    if feed_between > 0:
+        total_h += feed_between * (len(images_bw) - 1)
+    if total_h % 2:
+        total_h += 1
+
+    combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
+    y = 0
+    for i, bw in enumerate(images_bw):
+        combined.paste(bw, (0, y))
+        y += bw.height
+        if i < len(images_bw) - 1 and feed_between > 0:
+            y += feed_between
+
+    return pil_to_funny_lines(combined), combined
+
+
+def prepare_batch_pdf(path, pages, brightness=0, contrast=0, sharpness=0,
+                      dither="Floyd-Steinberg", rotation=0, feed_between=50):
+    """Несколько страниц PDF → одна длинная + funny_lines"""
+    import fitz
+    doc = fitz.open(path)
+    images_bw = []
+
+    for pg in pages:
+        page = doc[pg]
+        zoom = PRINTER_WIDTH / page.rect.width * 2
+        mat = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=mat)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        if rotation:
+            img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
+        img = _fit_to_printer(img)
+        img = apply_filters(img, brightness, contrast, sharpness)
+        gray = img.convert("L")
+        bw = dither_image(gray, dither)
+        images_bw.append(bw)
+
+    doc.close()
+
+    total_h = sum(im.height for im in images_bw)
+    if feed_between > 0:
+        total_h += feed_between * (len(images_bw) - 1)
+    if total_h % 2:
+        total_h += 1
+
+    combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
+    y = 0
+    for i, bw in enumerate(images_bw):
+        combined.paste(bw, (0, y))
+        y += bw.height
+        if i < len(images_bw) - 1 and feed_between > 0:
+            y += feed_between
+
+    return pil_to_funny_lines(combined), combined

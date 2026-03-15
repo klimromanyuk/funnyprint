@@ -33,6 +33,7 @@ class Printer:
         self._hs_q: asyncio.Queue = asyncio.Queue()
         self._ctrl_q: asyncio.Queue = asyncio.Queue()
         self.battery: int | str = "?"
+        self._cancel = False
 
     async def _write(self, data: bytes):
         await self.client.write_gatt_char(WRITE_UUID, data, response=False)
@@ -71,9 +72,20 @@ class Printer:
             raise Exception("Handshake failed!")
         self.log(f"🤝 Подключено! 🔋{self.battery}%")
 
+    def cancel(self):
+        self._cancel = True
+
     async def print_lines(self, funny_lines, density=3, feed_after=50):
         await self._write(pkt_density(density))
         await asyncio.sleep(0.1)
+
+        self._cancel = False
+        # Очищаем очередь от событий прошлой печати
+        while not self._ctrl_q.empty():
+            try:
+                self._ctrl_q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
         all_lines = list(funny_lines)
         real_count = len(all_lines)
@@ -112,6 +124,9 @@ class Printer:
                 elif ev == "done":
                     break
 
+            if self._cancel:
+                self.log("Печать прервана!")
+                break
             if cur < total:
                 await self._write(pkt_print_line(cur, all_lines[cur]))
                 cur += 1
@@ -127,9 +142,27 @@ class Printer:
                     break
                 await asyncio.sleep(0.5)
 
+        # Очищаем очередь от оставшихся событий
+        while not self._ctrl_q.empty():
+            try:
+                self._ctrl_q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+        self._cancel = False
         await self._write(pkt_print_event(total, end=True))
         self.log("Печать завершена!")
 
+    async def feed(self, pixels=100):
+        n = max(1, pixels // 2)
+        blank = bytes(96)
+        await self._write(pkt_print_event(n, end=False))
+        for i in range(n):
+            await self._write(pkt_print_line(i, blank))
+            await asyncio.sleep(0.02)
+        await asyncio.sleep(0.5)
+        await self._write(pkt_print_event(n, end=True))
+        self.log(f"Промотка {pixels}px")
 
 async def find_and_connect(
     on_log: Callable[[str], None] = print,

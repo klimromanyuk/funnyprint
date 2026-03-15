@@ -74,6 +74,7 @@ class App:
         self.connected = False
         self.busy = False
         self.image_path = None
+        self.batch_paths = None
         self.current_lines = None
         self.current_preview = None
         self._preview_tk = None
@@ -124,7 +125,10 @@ class App:
         self.busy = busy
         def _u():
             self.print_btn.set_enabled(not busy)
-            self.btn_feed.config(state=tk.DISABLED if busy else tk.NORMAL)
+            st = tk.DISABLED if busy else tk.NORMAL
+            self.btn_feed.config(state=st)
+            self.btn_batch.config(state=st)
+            self.btn_cancel.config(state=tk.NORMAL if busy else tk.DISABLED)
             if not busy:
                 self.root.after(1500, lambda: self.print_btn.set_progress(0))
         self.root.after(0, _u)
@@ -226,16 +230,19 @@ class App:
 
         pg_f = ttk.Frame(pdf_tab)
         pg_f.pack(fill=tk.X, pady=5)
-        ttk.Label(pg_f, text="Страница:").pack(side=tk.LEFT)
-        self.pdf_page_var = tk.IntVar(value=1)
-        self.pdf_page_spin = ttk.Spinbox(
-            pg_f, from_=1, to=1, width=4,
-            textvariable=self.pdf_page_var,
-            command=self._schedule)
-        self.pdf_page_spin.pack(side=tk.LEFT, padx=5)
-        self.pdf_page_spin.bind("<KeyRelease>", lambda e: self._schedule())
-        self.pdf_pages_lbl = ttk.Label(pg_f, text="/ 1")
-        self.pdf_pages_lbl.pack(side=tk.LEFT)
+        ttk.Label(pg_f, text="Страницы:").pack(side=tk.LEFT)
+        self.pdf_range_var = tk.StringVar(value="1")
+        pdf_range_entry = ttk.Entry(pg_f, textvariable=self.pdf_range_var,
+                                    font=("Arial", 11))
+        pdf_range_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        pdf_range_entry.bind("<KeyRelease>", lambda e: self._schedule())
+
+        self.pdf_pages_lbl = ttk.Label(pdf_tab, text="",
+                                       foreground="gray", font=("Arial", 8))
+        self.pdf_pages_lbl.pack(anchor=tk.W)
+        ttk.Label(pdf_tab,
+                  text='Примеры: "1", "1-3", "1,3,5", "all"',
+                  foreground="gray", font=("Arial", 8)).pack(anchor=tk.W)
 
         self.pdf_path = None
         self.pdf_page_count = 0
@@ -407,9 +414,15 @@ class App:
         pf.pack(fill=tk.X, pady=2)
         ttk.Label(pf, text="Промотка после:").pack(side=tk.LEFT)
         self.feed_var = tk.IntVar(value=DEFAULT_FEED_AFTER)
-        ttk.Spinbox(pf, from_=0, to=500, width=5,
-                    textvariable=self.feed_var).pack(side=tk.LEFT, padx=5)
+        feed_spin = ttk.Spinbox(pf, from_=0, to=500, width=5,
+                                textvariable=self.feed_var,
+                                command=self._schedule)
+        feed_spin.pack(side=tk.LEFT, padx=5)
+        feed_spin.bind("<KeyRelease>", lambda e: self._schedule())
         ttk.Label(pf, text="px").pack(side=tk.LEFT)
+        ttk.Label(sett, text="(принтер также делает свою промотку\n"
+                  "после каждой печати для отрыва)",
+                  foreground="gray", font=("Arial", 8)).pack(anchor=tk.W)
 
         # ── Кнопки ──
         bf = ttk.Frame(left)
@@ -422,6 +435,17 @@ class App:
         self.btn_feed = ttk.Button(bf, text="Промотать бумагу",
                                    command=self.on_feed)
         self.btn_feed.pack(fill=tk.X, pady=2)
+        self.btn_batch = ttk.Button(bf, text="Пакетная печать картинок",
+                                    command=self.on_batch)
+        self.btn_batch.pack(fill=tk.X, pady=2)
+
+        self.btn_cancel = tk.Button(
+            bf, text="ПРЕРВАТЬ", font=("Arial", 10, "bold"),
+            bg="#f44336", fg="white", activebackground="#c62828",
+            activeforeground="white", relief=tk.FLAT,
+            cursor="hand2", command=self._on_cancel,
+            state=tk.DISABLED)
+        self.btn_cancel.pack(fill=tk.X, pady=2)
 
         self.will_print_lbl = ttk.Label(
             left, text="", foreground="#555", wraplength=300)
@@ -635,14 +659,13 @@ class App:
         self._update_timer = None
         tab = self._get_tab()
         self._last_tab = tab
-        flt = dict(
-            brightness=int(self.bright_var.get()),
-            contrast=int(self.contrast_var.get()),
-            sharpness=int(self.sharp_var.get()),
-            dither=self.dither_var.get(),
-            rotation=int(self.rotation_var.get()),
-        )
+        flt = self._get_filters()
+        feed = self.feed_var.get()
         try:
+            # Если загружен пакет — обновляем его
+            if self.batch_paths and tab == 0:
+                self._update_batch_preview()
+                return
             if tab == 0:  # Картинка
                 if not self.image_path:
                     self.canvas.delete("all")
@@ -663,13 +686,29 @@ class App:
                     self.will_print_lbl.config(
                         text="Напечатается: [выбери PDF]")
                     return
-                from funnyprint.imaging import prepare_pdf_page
-                pg = max(0, self.pdf_page_var.get() - 1)
-                lines, preview = prepare_pdf_page(
-                    self.pdf_path, page_num=pg, **flt)
+                range_str = self.pdf_range_var.get().strip()
+                try:
+                    pages = self._parse_page_range(
+                        range_str, self.pdf_page_count)
+                except (ValueError, AttributeError):
+                    pages = [0]
+                if not pages:
+                    pages = [0]
+
+                if len(pages) == 1:
+                    from funnyprint.imaging import prepare_pdf_page
+                    lines, preview = prepare_pdf_page(
+                        self.pdf_path, page_num=pages[0], **flt)
+                    preview = add_feed_preview(preview, feed)
+                else:
+                    from funnyprint.imaging import prepare_batch_pdf
+                    lines, preview = prepare_batch_pdf(
+                        self.pdf_path, pages,
+                        feed_between=feed, **flt)
+
                 self.will_print_lbl.config(
                     text=f"Напечатается: {os.path.basename(self.pdf_path)}"
-                         f" стр.{pg + 1}")
+                         f" ({len(pages)} стр.)")
 
             elif tab == 2:  # Текст
                 text = self.text_widget.get("1.0", tk.END).strip()
@@ -728,8 +767,10 @@ class App:
                 return
 
             self.current_lines = lines
-            self.current_preview = preview
-            self._show_preview(preview)
+            from funnyprint.imaging import add_feed_preview
+            preview_with_feed = add_feed_preview(preview, feed)
+            self.current_preview = preview_with_feed
+            self._show_preview(preview_with_feed)
 
         except ValueError as e:
             self.log(f"Ошибка данных: {e}")
@@ -801,10 +842,11 @@ class App:
             self.pdf_page_count = get_pdf_page_count(path)
             self.pdf_lbl.config(
                 text=os.path.basename(path), foreground="black")
-            self.pdf_page_spin.config(to=self.pdf_page_count)
-            self.pdf_pages_lbl.config(text=f"/ {self.pdf_page_count}")
-            self.pdf_page_var.set(1)
-            self.tabs.select(1)  # PDF tab
+            self.pdf_pages_lbl.config(
+                text=f"Всего страниц: {self.pdf_page_count}")
+            self.pdf_range_var.set(
+                "1" if self.pdf_page_count == 1 else "all")
+            self.tabs.select(1)
             self.log(f"PDF (drop): {os.path.basename(path)}")
 
         elif ext in (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"):
@@ -824,6 +866,7 @@ class App:
         if not path:
             return
         self.image_path = path
+        self.batch_paths = None
         self.file_lbl.config(text=os.path.basename(path), foreground="black")
         self.log(f"Загружено: {os.path.basename(path)}")
         self._update_preview()
@@ -839,9 +882,12 @@ class App:
         self.pdf_page_count = get_pdf_page_count(path)
         self.pdf_lbl.config(
             text=os.path.basename(path), foreground="black")
-        self.pdf_page_spin.config(to=self.pdf_page_count)
-        self.pdf_pages_lbl.config(text=f"/ {self.pdf_page_count}")
-        self.pdf_page_var.set(1)
+        self.pdf_pages_lbl.config(
+            text=f"Всего страниц: {self.pdf_page_count}")
+        if self.pdf_page_count == 1:
+            self.pdf_range_var.set("1")
+        else:
+            self.pdf_range_var.set("all")
         self.log(f"PDF: {os.path.basename(path)}, {self.pdf_page_count} стр.")
         self._update_preview()
 
@@ -932,6 +978,72 @@ class App:
             self.log(f"Ошибка: {e}")
         finally:
             self._set_busy(False)
+
+    def on_batch(self):
+        """Пакетная печать картинок — загрузка и превью"""
+        paths = filedialog.askopenfilenames(
+            title="Выбери картинки",
+            filetypes=[
+                ("Картинки", "*.png *.jpg *.jpeg *.bmp *.gif *.webp"),
+                ("Все файлы", "*.*")])
+        if not paths:
+            return
+
+        self.batch_paths = list(paths)
+        self.log(f"Пакет: загружено {len(self.batch_paths)} картинок")
+        self._update_batch_preview()
+
+    def _update_batch_preview(self):
+        if not self.batch_paths:
+            return
+        flt = self._get_filters()
+        feed = self.feed_var.get()
+        try:
+            from funnyprint.imaging import prepare_batch_images
+            lines, preview = prepare_batch_images(
+                self.batch_paths, feed_between=feed, **flt)
+            from funnyprint.imaging import add_feed_preview
+            preview = add_feed_preview(preview, feed)
+            self.current_lines = lines
+            self.current_preview = preview
+            self._show_preview(preview)
+            self.will_print_lbl.config(
+                text=f"Напечатается: пакет ({len(self.batch_paths)} картинок)")
+        except Exception as e:
+            self.log(f"Ошибка пакета: {e}")
+
+    def _get_filters(self):
+        return dict(
+            brightness=int(self.bright_var.get()),
+            contrast=int(self.contrast_var.get()),
+            sharpness=int(self.sharp_var.get()),
+            dither=self.dither_var.get(),
+            rotation=int(self.rotation_var.get()),
+        )
+
+    def _parse_page_range(self, range_str, max_pages):
+        """Парсит '1-3,5,7-9' → список номеров страниц (0-based)"""
+        if range_str.strip().lower() == "all":
+            return list(range(max_pages))
+        pages = set()
+        for part in range_str.split(","):
+            part = part.strip()
+            if "-" in part:
+                start, end = part.split("-", 1)
+                start = max(1, int(start.strip()))
+                end = min(max_pages, int(end.strip()))
+                for p in range(start, end + 1):
+                    pages.add(p - 1)
+            else:
+                p = int(part.strip())
+                if 1 <= p <= max_pages:
+                    pages.add(p - 1)
+        return sorted(pages)
+
+    def _on_cancel(self):
+        if self.printer:
+            self.printer.cancel()
+            self.log("Отмена печати...")
 
     def _on_secret(self, event=None):
         if not self.connected or self.busy:
