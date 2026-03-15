@@ -247,6 +247,89 @@ class App:
         self.pdf_path = None
         self.pdf_page_count = 0
 
+        # -- Rich Text --
+        rt_tab = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(rt_tab, text="   Rich Text   ")
+
+        self.rt_widget = tk.Text(
+            rt_tab, height=5, width=30, wrap=tk.WORD,
+            font=("Consolas", 10), undo=True, maxundo=50)
+        self.rt_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
+        self.rt_widget.insert("1.0",
+            "<b>Жирный</b> и обычный\n"
+            "<i>Курсив</i> и <u>подчёркнутый</u>\n"
+            "[] Задача\n[x] Выполнена")
+        self.rt_widget.bind("<KeyRelease>", lambda e: self._schedule())
+
+        # Панель кнопок форматирования
+        rt_btn_frame = ttk.Frame(rt_tab)
+        rt_btn_frame.pack(fill=tk.X, pady=2)
+
+        rt_buttons = [
+            ("B", "b", True),
+            ("I", "i", True),
+            ("U", "u", True),
+            ("S", "s", True),
+            ("x²", "sup", True),
+            ("x₂", "sub", True),
+            ("Aa", "size:24", True),
+        ]
+        for text, tag, paired in rt_buttons:
+            btn = ttk.Button(rt_btn_frame, text=text, width=3,
+                command=lambda t=tag, p=paired: self._rt_insert_tag(t, p))
+            btn.pack(side=tk.LEFT, padx=1)
+
+        # Выравнивание
+        rt_align_frame = ttk.Frame(rt_tab)
+        rt_align_frame.pack(fill=tk.X, pady=2)
+        for label, tag in [("Лево", "left"), ("Центр", "center"),
+                           ("Право", "right")]:
+            ttk.Button(rt_align_frame, text=label, width=6,
+                command=lambda t=tag: self._rt_insert_tag(t, True)
+            ).pack(side=tk.LEFT, padx=1)
+
+        # Маркеры списков
+        rt_list_frame = ttk.Frame(rt_tab)
+        rt_list_frame.pack(fill=tk.X, pady=2)
+        markers = [
+            ("☐", "[] "), ("☑", "[x] "), ("•", "• "),
+            ("–", "- "), ("▶", "> "), ("★", "★ "),
+            ("○", "○ "), ("1.", "1. "),
+        ]
+        for label, marker in markers:
+            ttk.Button(rt_list_frame, text=label, width=3,
+                command=lambda m=marker: self._rt_insert_marker(m)
+            ).pack(side=tk.LEFT, padx=1)
+
+        # Шрифт для Rich Text
+        rt_font_f = ttk.Frame(rt_tab)
+        rt_font_f.pack(fill=tk.X, pady=2)
+        ttk.Label(rt_font_f, text="Шрифт:").pack(side=tk.LEFT)
+        self.rt_font_combo = ttk.Combobox(
+            rt_font_f, values=self.font_names,
+            state="readonly", width=18)
+        self.rt_font_combo.pack(side=tk.LEFT, padx=5)
+        for i, name in enumerate(self.font_names):
+            if "arial" in name.lower() and "bold" not in name.lower():
+                self.rt_font_combo.current(i)
+                break
+        self.rt_font_combo.bind("<<ComboboxSelected>>",
+                                lambda e: self._schedule())
+
+        rt_size_f = ttk.Frame(rt_tab)
+        rt_size_f.pack(fill=tk.X, pady=2)
+        ttk.Label(rt_size_f, text="Базовый размер:").pack(side=tk.LEFT)
+        self.rt_font_size_var = tk.IntVar(value=24)
+        ttk.Spinbox(rt_size_f, from_=8, to=96, width=4,
+                    textvariable=self.rt_font_size_var,
+                    command=self._schedule).pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(rt_tab,
+                  text="Подсказка: выдели текст и нажми кнопку\n"
+                  "для применения тега",
+                  foreground="gray", font=("Arial", 8),
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=2)
+
         # -- Текст --
         txt_tab = ttk.Frame(self.tabs, padding=8)
         self.tabs.add(txt_tab, text="   Текст   ")
@@ -662,11 +745,10 @@ class App:
         flt = self._get_filters()
         feed = self.feed_var.get()
         try:
-            # Если загружен пакет — обновляем его
-            if self.batch_paths and tab == 0:
-                self._update_batch_preview()
-                return
             if tab == 0:  # Картинка
+                if self.batch_paths:
+                    self._update_batch_preview()
+                    return
                 if not self.image_path:
                     self.canvas.delete("all")
                     self.size_lbl.config(text="")
@@ -694,7 +776,6 @@ class App:
                     pages = [0]
                 if not pages:
                     pages = [0]
-
                 if len(pages) == 1:
                     from funnyprint.imaging import prepare_pdf_page
                     lines, preview = prepare_pdf_page(
@@ -705,12 +786,48 @@ class App:
                     lines, preview = prepare_batch_pdf(
                         self.pdf_path, pages,
                         feed_between=feed, **flt)
-
                 self.will_print_lbl.config(
                     text=f"Напечатается: {os.path.basename(self.pdf_path)}"
                          f" ({len(pages)} стр.)")
 
-            elif tab == 2:  # Текст
+            elif tab == 2:  # Rich Text
+                rt = self.rt_widget.get("1.0", tk.END).strip()
+                if not rt:
+                    self.canvas.delete("all")
+                    self.size_lbl.config(text="")
+                    self.current_lines = None
+                    self.will_print_lbl.config(
+                        text="Напечатается: [введи rich text]")
+                    return
+                from funnyprint.richtext import render_rich_text, TextStyle
+                fn = self.rt_font_combo.get() or self.font_names[0]
+                fp = self.system_fonts.get(fn)
+                rt_style = TextStyle(
+                    font_path=fp,
+                    font_size=self.rt_font_size_var.get(),
+                    align="left")
+                img = render_rich_text(rt, rt_style)
+                from funnyprint.imaging import (
+                    apply_filters, dither_image, pil_to_funny_lines,
+                    _trim_whitespace, _fit_to_printer)
+                img = apply_filters(img,
+                    brightness=flt["brightness"],
+                    contrast=flt["contrast"],
+                    sharpness=flt["sharpness"])
+                rotation = flt["rotation"]
+                if rotation:
+                    from funnyprint.imaging import _rotate_and_fit
+                    img = _rotate_and_fit(img, rotation)
+                else:
+                    img = _trim_whitespace(img)
+                    img = _fit_to_printer(img)
+                gray = img.convert("L")
+                preview = dither_image(gray, flt["dither"])
+                lines = pil_to_funny_lines(preview)
+                self.will_print_lbl.config(
+                    text=f"Напечатается: rich text [{fn}]")
+
+            elif tab == 3:  # Текст
                 text = self.text_widget.get("1.0", tk.END).strip()
                 if not text:
                     self.canvas.delete("all")
@@ -734,7 +851,7 @@ class App:
                 self.will_print_lbl.config(
                     text=f"Напечатается: текст [{fn}]{mode}")
 
-            elif tab == 3:  # QR
+            elif tab == 4:  # QR
                 data = self.qr_entry.get("1.0", tk.END).strip()
                 if not data:
                     self.canvas.delete("all")
@@ -748,7 +865,7 @@ class App:
                     data, add_text=self.qr_text_var.get(), **flt)
                 self.will_print_lbl.config(text="Напечатается: QR-код")
 
-            elif tab == 4:  # Barcode
+            elif tab == 5:  # Barcode
                 data = self.bc_entry.get().strip()
                 if not data:
                     self.canvas.delete("all")
@@ -1039,6 +1156,55 @@ class App:
                 if 1 <= p <= max_pages:
                     pages.add(p - 1)
         return sorted(pages)
+
+    def _rt_insert_tag(self, tag, paired=True):
+        """Вставляет тег в Rich Text поле"""
+        w = self.rt_widget
+        try:
+            sel_start = w.index(tk.SEL_FIRST)
+            sel_end = w.index(tk.SEL_LAST)
+            selected = w.get(sel_start, sel_end)
+            if tag.startswith("size:"):
+                open_tag = f"<{tag}>"
+                close_tag = "</size>"
+            else:
+                open_tag = f"<{tag}>"
+                close_tag = f"</{tag}>"
+            w.delete(sel_start, sel_end)
+            w.insert(sel_start, open_tag + selected + close_tag)
+        except tk.TclError:
+            # Нет выделения — вставляем пустые теги
+            if tag.startswith("size:"):
+                open_tag = f"<{tag}>"
+                close_tag = "</size>"
+            else:
+                open_tag = f"<{tag}>"
+                close_tag = f"</{tag}>"
+            pos = w.index(tk.INSERT)
+            w.insert(pos, open_tag + close_tag)
+            # Курсор между тегами
+            w.mark_set(tk.INSERT, f"{pos}+{len(open_tag)}c")
+        w.focus_set()
+        self._schedule()
+
+    def _rt_insert_marker(self, marker):
+        """Вставляет маркер списка в начало строки"""
+        w = self.rt_widget
+        try:
+            sel_start = w.index(tk.SEL_FIRST)
+            sel_end = w.index(tk.SEL_LAST)
+            # Вставляем маркер в начало каждой выделенной строки
+            start_line = int(sel_start.split('.')[0])
+            end_line = int(sel_end.split('.')[0])
+            for line_no in range(start_line, end_line + 1):
+                w.insert(f"{line_no}.0", marker)
+        except tk.TclError:
+            # Нет выделения — вставляем в начало текущей строки
+            pos = w.index(tk.INSERT)
+            line_no = pos.split('.')[0]
+            w.insert(f"{line_no}.0", marker)
+        w.focus_set()
+        self._schedule()
 
     def _on_cancel(self):
         if self.printer:
