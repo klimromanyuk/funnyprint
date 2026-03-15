@@ -71,13 +71,7 @@ class Printer:
             raise Exception("Handshake failed!")
         self.log(f"🤝 Подключено! 🔋{self.battery}%")
 
-    async def print_lines(
-        self,
-        funny_lines: list[bytes],
-        density: int = 3,
-        feed_after: int = 50,
-    ):
-        """Печать данных + промотка (всё одной сессией)"""
+    async def print_lines(self, funny_lines, density=3, feed_after=50):
         await self._write(pkt_density(density))
         await asyncio.sleep(0.1)
 
@@ -93,15 +87,16 @@ class Printer:
         await self._write(pkt_print_event(total, end=False))
 
         cur = 0
-        wait = 0
+        wait_start = None
+        max_wait = max(30, real_count * 0.3)
 
         while True:
             if not self._ctrl_q.empty():
                 ev, val = await self._ctrl_q.get()
                 if ev == "lost":
                     cur = max(0, val - 1)
-                    wait = 0
-                    self.log(f"🔄 Повтор с строки {cur}")
+                    wait_start = None
+                    self.log(f"Повтор с строки {cur}")
                     continue
                 elif ev == "pause":
                     self.log("Перегрев! Пауза 5 сек...")
@@ -111,7 +106,8 @@ class Printer:
                             self._ctrl_q.get_nowait()
                         except asyncio.QueueEmpty:
                             break
-                    self.log("▶️ Продолжаем")
+                    self.log("Продолжаем")
+                    wait_start = None
                     continue
                 elif ev == "done":
                     break
@@ -120,31 +116,19 @@ class Printer:
                 await self._write(pkt_print_line(cur, all_lines[cur]))
                 cur += 1
                 if self.on_progress:
-                    pct = min(100, 100 * cur // real_count)
-                    self.on_progress(pct)
+                    self.on_progress(min(100, 100 * cur // real_count))
                 await asyncio.sleep(0.02)
             else:
-                if wait > 50:
+                if wait_start is None:
+                    wait_start = asyncio.get_event_loop().time()
+                elapsed = asyncio.get_event_loop().time() - wait_start
+                if elapsed > max_wait:
+                    self.log(f"Таймаут {max_wait:.0f}с, завершаем")
                     break
-                if not self._ctrl_q.empty():
-                    continue
-                wait += 1
                 await asyncio.sleep(0.5)
 
         await self._write(pkt_print_event(total, end=True))
-        self.log("✅ Печать завершена!")
-
-    async def feed(self, pixels: int = 100):
-        """Промотка бумаги отдельной операцией"""
-        n = max(1, pixels // 2)
-        blank = bytes(96)
-        await self._write(pkt_print_event(n, end=False))
-        for i in range(n):
-            await self._write(pkt_print_line(i, blank))
-            await asyncio.sleep(0.02)
-        await asyncio.sleep(0.5)
-        await self._write(pkt_print_event(n, end=True))
-        self.log(f"📜 Промотка {pixels}px")
+        self.log("Печать завершена!")
 
 
 async def find_and_connect(
@@ -188,8 +172,8 @@ async def find_and_connect(
             if client.is_connected:
                 await asyncio.sleep(1)
                 break
-        except asyncio.CancelledError:
-            on_log("  ⚠️ BLE таймаут, повтор...")
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            on_log("  BLE таймаут, повтор...")
             try:
                 await client.disconnect()
             except Exception:
