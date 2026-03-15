@@ -198,7 +198,7 @@ class App:
         # Вкладки (растягиваются!)
         self.tabs = ttk.Notebook(left)
         self.tabs.pack(fill=tk.BOTH, expand=True, padx=2, pady=(2, 0))
-        self.tabs.bind("<<NotebookTabSelected>>", self._on_tab_change)
+        self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_change)
 
         # -- Картинка --
         img_tab = ttk.Frame(self.tabs, padding=8)
@@ -377,8 +377,6 @@ class App:
                    command=self._zoom_in).pack(side=tk.LEFT)
         ttk.Button(zb, text="1:1", width=3,
                    command=self._zoom_reset).pack(side=tk.LEFT, padx=5)
-        ttk.Button(zb, text="Обновить",
-                   command=self._update_preview).pack(side=tk.RIGHT, padx=5)
 
         cf = ttk.Frame(right)
         cf.pack(fill=tk.BOTH, expand=True)
