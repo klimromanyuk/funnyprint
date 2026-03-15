@@ -593,6 +593,11 @@ class App:
 
         # ── Горячие клавиши для любой раскладки ──
         self.root.bind_all("<Key>", self._on_global_key)
+        # Горячие клавиши приложения
+        self.root.bind("<Control-p>", lambda e: self.on_print())
+        self.root.bind("<Control-P>", lambda e: self.on_print())
+        self.root.bind("<Control-o>", lambda e: self._hotkey_open())
+        self.root.bind("<Control-O>", lambda e: self._hotkey_open())
 
         self.root.after(500, self._update_preview)
         # Drag & Drop
@@ -709,6 +714,16 @@ class App:
                 except Exception:
                     pass
                 return "break"
+            
+        # Ctrl+P - печать
+        if ch == '\x10':
+            self.on_print()
+            return "break"
+
+        # Ctrl+O - открыть файл
+        if ch == '\x0f':
+            self._hotkey_open()
+            return "break"
 
     def _on_global_wheel(self, event):
         if isinstance(event.widget, (tk.Text, tk.Listbox)):
@@ -1007,6 +1022,16 @@ class App:
             self.pdf_range_var.set("all")
         self.log(f"PDF: {os.path.basename(path)}, {self.pdf_page_count} стр.")
         self._update_preview()
+
+    def _hotkey_open(self):
+        """Ctrl+O — открыть файл в зависимости от вкладки"""
+        tab = self._get_tab()
+        if tab == 0:
+            self.on_load_image()
+        elif tab == 1:
+            self.on_load_pdf()
+        elif tab == 0 and self.batch_paths:
+            self.on_batch()
 
     # ══════════════════════════════════
     #  BLE
