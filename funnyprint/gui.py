@@ -703,9 +703,11 @@ class App:
 
     def _on_close(self):
         if self.connected:
-            self._run_async(self._do_disconnect())
-            import time
-            time.sleep(0.5)
+            future = self._run_async(self._do_disconnect())
+            try:
+                future.result(timeout=2)
+            except Exception:
+                pass
         try:
             self._ble_loop.call_soon_threadsafe(self._ble_loop.stop)
         except Exception:
