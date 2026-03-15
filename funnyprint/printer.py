@@ -128,11 +128,14 @@ class Printer:
                 self.log("Печать прервана!")
                 break
             if cur < total:
+                if self._cancel:
+                    self.log("Печать прервана!")
+                    break
                 await self._write(pkt_print_line(cur, all_lines[cur]))
                 cur += 1
                 if self.on_progress:
                     self.on_progress(min(100, 100 * cur // real_count))
-                await asyncio.sleep(0.02)
+                await asyncio.sleep(0.025)
             else:
                 if wait_start is None:
                     wait_start = asyncio.get_event_loop().time()

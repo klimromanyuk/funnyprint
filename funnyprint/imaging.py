@@ -730,19 +730,37 @@ def prepare_batch_images(paths, brightness=0, contrast=0, sharpness=0,
         bw = dither_image(gray, dither)
         images_bw.append(bw)
 
+    # Ограничиваем превью по высоте для производительности
+    MAX_PREVIEW_H = 20000
     total_h = sum(im.height for im in images_bw)
     if feed_between > 0:
         total_h += feed_between * (len(images_bw) - 1)
     if total_h % 2:
         total_h += 1
-    combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
+
+    # Для превью обрезаем, для печати — всё
+    preview_h = min(total_h, MAX_PREVIEW_H)
+    combined = Image.new("1", (PRINTER_WIDTH, preview_h), color=1)
     y = 0
     for i, bw in enumerate(images_bw):
-        combined.paste(bw, (0, y))
+        if y >= preview_h:
+            break
+        paste_h = min(bw.height, preview_h - y)
+        combined.paste(bw.crop((0, 0, PRINTER_WIDTH, paste_h)), (0, y))
         y += bw.height
         if i < len(images_bw) - 1 and feed_between > 0:
             y += feed_between
-    return pil_to_funny_lines(combined), combined
+
+    # funny_lines из ВСЕХ картинок (не обрезанных)
+    all_lines = []
+    for i, bw in enumerate(images_bw):
+        all_lines.extend(pil_to_funny_lines(bw))
+        if i < len(images_bw) - 1 and feed_between > 0:
+            blank = bytes(96)
+            for _ in range(feed_between // 2):
+                all_lines.append(blank)
+
+    return all_lines, combined
 
 
 def prepare_batch_pdf(path, pages, brightness=0, contrast=0, sharpness=0,
@@ -887,3 +905,158 @@ def _pencil_sketch(img):
 
     sketch = Image.fromarray(result, mode="L")
     return sketch.convert("RGB")
+
+# ════════════════════════════════════════
+#  Ленивая генерация для больших данных
+# ════════════════════════════════════════
+
+def prepare_text_chunked(text, chunk_index=0, **kwargs):
+    """Генерирует текст и возвращает один чанк.
+    Returns: (chunk_lines, preview_img, total_chunks, total_lines)
+    """
+    from funnyprint.chunked import MAX_CHUNK_LINES, estimate_chunks
+    lines, full_preview = prepare_text(text, **kwargs)
+    total = len(lines)
+    chunks = estimate_chunks(total)
+    start = chunk_index * MAX_CHUNK_LINES
+    end = min(start + MAX_CHUNK_LINES, total)
+    chunk = lines[start:end]
+
+    # Превью только для текущего чанка
+    chunk_h = len(chunk) * 2
+    if chunk_h % 2:
+        chunk_h += 1
+    preview = Image.new("1", (PRINTER_WIDTH, max(2, chunk_h)), color=1)
+    # Рендерим из funny_lines обратно
+    preview = _lines_to_preview(chunk)
+
+    return chunk, preview, chunks, total
+
+
+def prepare_batch_images_chunked(paths, chunk_index=0, feed_between=50,
+                                 **kwargs):
+    """Batch картинок с чанками — обрабатывает только нужные файлы.
+    Returns: (chunk_lines, preview_img, total_chunks, total_files)
+    """
+    from funnyprint.chunked import MAX_CHUNK_LINES
+    from funnyprint.borders import apply_border
+
+    border = kwargs.pop("border", "Нет")
+
+    # Сначала оцениваем размеры каждой картинки (без полной обработки)
+    file_line_counts = []
+    for path in paths:
+        try:
+            img = Image.open(path)
+            w, h = img.size
+            new_h = max(2, int(h * PRINTER_WIDTH / w))
+            funny_count = (new_h + 1) // 2
+            file_line_counts.append(funny_count)
+            img.close()
+        except Exception:
+            file_line_counts.append(50)  # fallback
+
+    # Добавляем промотку между файлами
+    feed_lines = feed_between // 2 if feed_between > 0 else 0
+
+    # Определяем какие файлы попадают в какой чанк
+    chunks_map = []  # [(start_file, end_file), ...]
+    current_lines = 0
+    chunk_start = 0
+    for i, fc in enumerate(file_line_counts):
+        if current_lines + fc > MAX_CHUNK_LINES and current_lines > 0:
+            chunks_map.append((chunk_start, i))
+            chunk_start = i
+            current_lines = 0
+        current_lines += fc + feed_lines
+    chunks_map.append((chunk_start, len(paths)))
+
+    total_chunks = len(chunks_map)
+    if chunk_index >= total_chunks:
+        chunk_index = total_chunks - 1
+
+    # Обрабатываем только файлы текущего чанка
+    start_file, end_file = chunks_map[chunk_index]
+    chunk_paths = paths[start_file:end_file]
+
+    images_bw = []
+    for path in chunk_paths:
+        try:
+            img = Image.open(path)
+            if img.mode in ("RGBA", "LA", "PA"):
+                bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+                bg.paste(img, mask=img.split()[-1])
+                img = bg.convert("RGB")
+            elif img.mode != "RGB":
+                img = img.convert("RGB")
+
+            rotation = kwargs.get("rotation", 0)
+            if rotation:
+                img = img.rotate(-rotation, expand=True,
+                                 fillcolor=(255, 255, 255))
+            w, h = img.size
+            new_h = max(2, int(h * PRINTER_WIDTH / w))
+            if new_h % 2:
+                new_h += 1
+            img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
+
+            img = apply_filters(img,
+                                kwargs.get("brightness", 0),
+                                kwargs.get("contrast", 0),
+                                kwargs.get("sharpness", 0))
+            img = apply_artistic_filter(img, kwargs.get("artistic", "Нет"))
+            if border != "Нет":
+                img = apply_border(img, border)
+                img = _fit_to_printer(img)
+
+            gray = img.convert("L")
+            bw = dither_image(gray, kwargs.get("dither", "Floyd-Steinberg"))
+            images_bw.append(bw)
+        except Exception:
+            pass
+
+    # Склеиваем чанк
+    total_h = sum(im.height for im in images_bw)
+    if feed_between > 0 and len(images_bw) > 1:
+        total_h += feed_between * (len(images_bw) - 1)
+    if total_h % 2:
+        total_h += 1
+    if total_h < 2:
+        total_h = 2
+
+    combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
+    y = 0
+    for i, bw in enumerate(images_bw):
+        combined.paste(bw, (0, y))
+        y += bw.height
+        if i < len(images_bw) - 1 and feed_between > 0:
+            y += feed_between
+
+    lines = pil_to_funny_lines(combined)
+    return lines, combined, total_chunks, len(paths)
+
+
+def _lines_to_preview(funny_lines):
+    """funny_lines → PIL Image mode '1' для превью"""
+    h = len(funny_lines) * 2
+    if h < 2:
+        h = 2
+    if h % 2:
+        h += 1
+    img = Image.new("1", (PRINTER_WIDTH, h), color=1)
+    bpl = PRINTER_WIDTH // 8  # 48
+
+    y = 0
+    for fl in funny_lines:
+        for row in range(2):
+            if y >= h:
+                break
+            row_data = fl[row * 48:(row + 1) * 48]
+            for byte_idx, byte_val in enumerate(row_data):
+                for bit in range(8):
+                    x = byte_idx * 8 + bit
+                    if x < PRINTER_WIDTH:
+                        pixel = 0 if (byte_val >> (7 - bit)) & 1 else 1
+                        img.putpixel((x, y), pixel)
+            y += 1
+    return img
