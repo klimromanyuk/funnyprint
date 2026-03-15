@@ -290,7 +290,8 @@ def _wrap_text(text, font, max_width, draw, stroke=0):
 # ════════════════════════════════════════
 
 def prepare_image(path, brightness=0, contrast=0, sharpness=0,
-                  dither="Floyd-Steinberg", rotation=0):
+                  dither="Floyd-Steinberg", rotation=0,
+                  artistic="Нет"):
     img = Image.open(path)
     if img.mode in ("RGBA", "LA", "PA"):
         bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
@@ -298,18 +299,15 @@ def prepare_image(path, brightness=0, contrast=0, sharpness=0,
         img = bg.convert("RGB")
     elif img.mode != "RGB":
         img = img.convert("RGB")
-
-    # Поворот ДО масштабирования — чтобы использовать полную ширину
     if rotation:
         img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
-
-    # Всегда масштабируем по ширине принтера
     w, h = img.size
     new_h = max(2, int(h * PRINTER_WIDTH / w))
     if new_h % 2:
         new_h += 1
     img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
     img = apply_filters(img, brightness, contrast, sharpness)
+    img = apply_artistic_filter(img, artistic)
     gray = img.convert("L")
     bw = dither_image(gray, dither)
     return pil_to_funny_lines(bw), bw
@@ -323,7 +321,7 @@ def prepare_text(text, font_path=None, font_size=24,
                  brightness=0, contrast=0, sharpness=0,
                  dither="Floyd-Steinberg", rotation=0,
                  bold=False, italic=False, align="left",
-                 strip_mode=False):
+                 strip_mode=False, artistic="Нет"):
     font = load_font(font_path, font_size)
     stroke = 2 if bold else 0
     line_h = font_size + 6
@@ -388,6 +386,7 @@ def prepare_text(text, font_path=None, font_size=24,
         y += line_h
 
     img = apply_filters(img, brightness, contrast, sharpness)
+    img = apply_artistic_filter(img, artistic)
 
     # Обрезаем пустоту, вписываем в PRINTER_WIDTH
     img = _trim_whitespace(img)
@@ -403,7 +402,7 @@ def prepare_text(text, font_path=None, font_size=24,
 
 def _prepare_strip(text, font, font_size, line_h, pad, stroke,
                    italic, align, brightness, contrast, sharpness,
-                   dither, rotation, dummy_draw):
+                   dither, rotation, dummy_draw, artistic="Нет"):
     max_lines = PRINTER_WIDTH // line_h
     lines = text.replace("\\n", "\n").split("\n")
 
@@ -461,6 +460,7 @@ def _prepare_strip(text, font, font_size, line_h, pad, stroke,
     img = _fit_to_printer(img)
 
     img = apply_filters(img, brightness, contrast, sharpness)
+    img = apply_artistic_filter(img, artistic)
     if rotation:
         img = _rotate_and_fit(img, rotation)
 
@@ -486,7 +486,8 @@ def get_pdf_page_count(path):
 
 
 def prepare_pdf_page(path, page_num=0, brightness=0, contrast=0,
-                     sharpness=0, dither="Floyd-Steinberg", rotation=0):
+                     sharpness=0, dither="Floyd-Steinberg", rotation=0,
+                     artistic="Нет"):
     """Рендерит одну страницу PDF → (funny_lines, preview)"""
     import fitz
     doc = fitz.open(path)
@@ -504,6 +505,7 @@ def prepare_pdf_page(path, page_num=0, brightness=0, contrast=0,
 
     img = _fit_to_printer(img)
     img = apply_filters(img, brightness, contrast, sharpness)
+    img = apply_artistic_filter(img, artistic)
     gray = img.convert("L")
     bw = dither_image(gray, dither)
     return pil_to_funny_lines(bw), bw
@@ -630,13 +632,14 @@ BARCODE_TYPES = [
 
 def prepare_qr(data, add_text=False, font_path=None, font_size=16,
                brightness=0, contrast=0, sharpness=0,
-               dither="Floyd-Steinberg", rotation=0):
+               dither="Floyd-Steinberg", rotation=0, artistic="Нет"):
     img = generate_qr(data, add_text=add_text,
                       font_path=font_path, font_size=font_size)
     if rotation:
         img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
     img = _fit_to_printer(img)
     img = apply_filters(img, brightness, contrast, sharpness)
+    img = apply_artistic_filter(img, artistic)
     gray = img.convert("L")
     bw = dither_image(gray, dither)
     return pil_to_funny_lines(bw), bw
@@ -644,13 +647,14 @@ def prepare_qr(data, add_text=False, font_path=None, font_size=16,
 
 def prepare_barcode(data, barcode_type="code128", add_text=True,
                     brightness=0, contrast=0, sharpness=0,
-                    dither="Floyd-Steinberg", rotation=0):
+                    dither="Floyd-Steinberg", rotation=0, artistic="Нет"):
     img = generate_barcode(data, barcode_type, add_text)
     if rotation:
         img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
     img = _trim_whitespace(img)
     img = _fit_to_printer(img)
     img = apply_filters(img, brightness, contrast, sharpness)
+    img = apply_artistic_filter(img, artistic)
     gray = img.convert("L")
     bw = dither_image(gray, dither)
     return pil_to_funny_lines(bw), bw
@@ -670,7 +674,8 @@ def add_feed_preview(img_1bit, feed_px):
 
 
 def prepare_batch_images(paths, brightness=0, contrast=0, sharpness=0,
-                         dither="Floyd-Steinberg", rotation=0, feed_between=50):
+                         dither="Floyd-Steinberg", rotation=0,
+                         feed_between=50, artistic="Нет"):
     """Несколько картинок → одна длинная + funny_lines"""
     images_bw = []
     for path in paths:
@@ -690,6 +695,7 @@ def prepare_batch_images(paths, brightness=0, contrast=0, sharpness=0,
             new_h += 1
         img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
         img = apply_filters(img, brightness, contrast, sharpness)
+        img = apply_artistic_filter(img, artistic)
         gray = img.convert("L")
         bw = dither_image(gray, dither)
         images_bw.append(bw)
@@ -713,7 +719,8 @@ def prepare_batch_images(paths, brightness=0, contrast=0, sharpness=0,
 
 
 def prepare_batch_pdf(path, pages, brightness=0, contrast=0, sharpness=0,
-                      dither="Floyd-Steinberg", rotation=0, feed_between=50):
+                      dither="Floyd-Steinberg", rotation=0, feed_between=50,
+                      artistic="Нет"):
     """Несколько страниц PDF → одна длинная + funny_lines"""
     import fitz
     doc = fitz.open(path)
@@ -729,6 +736,7 @@ def prepare_batch_pdf(path, pages, brightness=0, contrast=0, sharpness=0,
             img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
         img = _fit_to_printer(img)
         img = apply_filters(img, brightness, contrast, sharpness)
+        img = apply_artistic_filter(img, artistic)
         gray = img.convert("L")
         bw = dither_image(gray, dither)
         images_bw.append(bw)
@@ -750,3 +758,106 @@ def prepare_batch_pdf(path, pages, brightness=0, contrast=0, sharpness=0,
             y += feed_between
 
     return pil_to_funny_lines(combined), combined
+
+# ════════════════════════════════════════
+#  Художественные фильтры
+# ════════════════════════════════════════
+
+ARTISTIC_FILTERS = [
+    "Нет",
+    "LineArt (контуры)",
+    "LineArt (тонкие)",
+    "Инверсия",
+    "Высокий контраст",
+    "Постеризация",
+    "Тиснение",
+    "Карандашный набросок",
+]
+
+
+def apply_artistic_filter(img, filter_name):
+    """Применяет художественный фильтр к RGB изображению"""
+    if filter_name == "Нет" or not filter_name:
+        return img
+
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    if filter_name == "LineArt (контуры)":
+        return _lineart(img, thin=False)
+
+    elif filter_name == "LineArt (тонкие)":
+        return _lineart(img, thin=True)
+
+    elif filter_name == "Инверсия":
+        from PIL import ImageOps
+        return ImageOps.invert(img)
+
+    elif filter_name == "Высокий контраст":
+        gray = img.convert("L")
+        # Порог по среднему
+        import numpy as np
+        arr = np.array(gray)
+        threshold = arr.mean()
+        bw = gray.point(lambda x: 255 if x > threshold else 0)
+        return bw.convert("RGB")
+
+    elif filter_name == "Постеризация":
+        from PIL import ImageOps
+        return ImageOps.posterize(img, 2)
+
+    elif filter_name == "Тиснение":
+        from PIL import ImageFilter
+        gray = img.convert("L")
+        emboss = gray.filter(ImageFilter.EMBOSS)
+        return emboss.convert("RGB")
+
+    elif filter_name == "Карандашный набросок":
+        return _pencil_sketch(img)
+
+    return img
+
+
+def _lineart(img, thin=False):
+    from PIL import ImageFilter, ImageOps
+    gray = img.convert("L")
+    if thin:
+        # Canny-подобный: два прохода с разным порогом
+        edges1 = gray.filter(ImageFilter.Kernel(
+            size=(3, 3),
+            kernel=[-1, -1, -1, -1, 8, -1, -1, -1, -1],
+            scale=1, offset=0))
+        edges1 = ImageOps.invert(edges1)
+        edges1 = edges1.point(lambda x: 255 if x > 200 else 0)
+        return edges1.convert("RGB")
+    else:
+        edges = gray.filter(ImageFilter.FIND_EDGES)
+        edges = ImageOps.invert(edges)
+        edges = ImageEnhance.Contrast(edges.convert("RGB")).enhance(2.0)
+        return edges
+
+def _pencil_sketch(img):
+    """Эффект карандашного наброска"""
+    from PIL import ImageFilter, ImageOps
+    import numpy as np
+
+    gray = img.convert("L")
+
+    # Инвертируем
+    inv = ImageOps.invert(gray)
+
+    # Размытие инвертированного
+    blur = inv.filter(ImageFilter.GaussianBlur(radius=12))
+
+    # Color Dodge: result = gray * 256 / (256 - blur)
+    gray_arr = np.array(gray, dtype=np.float32)
+    blur_arr = np.array(blur, dtype=np.float32)
+
+    # Избегаем деления на 0
+    divisor = 256.0 - blur_arr
+    divisor[divisor == 0] = 1
+
+    result = np.clip(gray_arr * 256.0 / divisor, 0, 255).astype(np.uint8)
+
+    sketch = Image.fromarray(result, mode="L")
+    return sketch.convert("RGB")

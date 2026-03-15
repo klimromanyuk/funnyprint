@@ -453,6 +453,16 @@ class App:
         self._slider(sett, "Контраст", -100, 100, 0, "contrast_var")
         self._slider(sett, "Резкость", -100, 100, 0, "sharp_var")
 
+        # Художественный фильтр
+        af = ttk.Frame(sett)
+        af.pack(fill=tk.X, pady=2)
+        ttk.Label(af, text="Фильтр:").pack(side=tk.LEFT)
+        self.artistic_var = tk.StringVar(value="Нет")
+        from funnyprint.imaging import ARTISTIC_FILTERS
+        ttk.Combobox(af, values=ARTISTIC_FILTERS,
+                     textvariable=self.artistic_var,
+                     state="readonly", width=18).pack(side=tk.LEFT, padx=5)
+        self.artistic_var.trace_add("write", lambda *a: self._schedule())
         df = ttk.Frame(sett)
         df.pack(fill=tk.X, pady=2)
         ttk.Label(df, text="Дизеринг:").pack(side=tk.LEFT)
@@ -829,6 +839,8 @@ class App:
                     brightness=flt["brightness"],
                     contrast=flt["contrast"],
                     sharpness=flt["sharpness"])
+                from funnyprint.imaging import apply_artistic_filter
+                img = apply_artistic_filter(img, flt.get("artistic", "Нет"))
                 rotation = flt["rotation"]
                 if rotation:
                     from funnyprint.imaging import _rotate_and_fit
@@ -1161,6 +1173,7 @@ class App:
             sharpness=int(self.sharp_var.get()),
             dither=self.dither_var.get(),
             rotation=int(self.rotation_var.get()),
+            artistic=self.artistic_var.get(),
         )
 
     def _parse_page_range(self, range_str, max_pages):
