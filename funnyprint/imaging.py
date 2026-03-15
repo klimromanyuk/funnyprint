@@ -291,7 +291,7 @@ def _wrap_text(text, font, max_width, draw, stroke=0):
 
 def prepare_image(path, brightness=0, contrast=0, sharpness=0,
                   dither="Floyd-Steinberg", rotation=0,
-                  artistic="Нет"):
+                  artistic="Нет", border="Нет"):
     img = Image.open(path)
     if img.mode in ("RGBA", "LA", "PA"):
         bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
@@ -308,6 +308,14 @@ def prepare_image(path, brightness=0, contrast=0, sharpness=0,
     img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
     img = apply_filters(img, brightness, contrast, sharpness)
     img = apply_artistic_filter(img, artistic)
+    if border != "Нет":
+        from funnyprint.borders import apply_border
+        img = apply_border(img, border)
+        w, h = img.size
+        new_h = max(2, int(h * PRINTER_WIDTH / w))
+        if new_h % 2:
+            new_h += 1
+        img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
     gray = img.convert("L")
     bw = dither_image(gray, dither)
     return pil_to_funny_lines(bw), bw
@@ -321,7 +329,8 @@ def prepare_text(text, font_path=None, font_size=24,
                  brightness=0, contrast=0, sharpness=0,
                  dither="Floyd-Steinberg", rotation=0,
                  bold=False, italic=False, align="left",
-                 strip_mode=False, artistic="Нет"):
+                 strip_mode=False, artistic="Нет",
+                 border="Нет"):
     font = load_font(font_path, font_size)
     stroke = 2 if bold else 0
     line_h = font_size + 6
@@ -394,6 +403,11 @@ def prepare_text(text, font_path=None, font_size=24,
 
     if rotation:
         img = _rotate_and_fit(img, rotation)
+
+    if border != "Нет":
+        from funnyprint.borders import apply_border
+        img = apply_border(img, border)
+        img = _fit_to_printer(img)
 
     gray = img.convert("L")
     bw = dither_image(gray, dither)
@@ -487,7 +501,7 @@ def get_pdf_page_count(path):
 
 def prepare_pdf_page(path, page_num=0, brightness=0, contrast=0,
                      sharpness=0, dither="Floyd-Steinberg", rotation=0,
-                     artistic="Нет"):
+                     artistic="Нет", border="Нет"):
     """Рендерит одну страницу PDF → (funny_lines, preview)"""
     import fitz
     doc = fitz.open(path)
@@ -506,6 +520,10 @@ def prepare_pdf_page(path, page_num=0, brightness=0, contrast=0,
     img = _fit_to_printer(img)
     img = apply_filters(img, brightness, contrast, sharpness)
     img = apply_artistic_filter(img, artistic)
+    if border != "Нет":
+        from funnyprint.borders import apply_border
+        img = apply_border(img, border)
+        img = _fit_to_printer(img)
     gray = img.convert("L")
     bw = dither_image(gray, dither)
     return pil_to_funny_lines(bw), bw
@@ -632,7 +650,8 @@ BARCODE_TYPES = [
 
 def prepare_qr(data, add_text=False, font_path=None, font_size=16,
                brightness=0, contrast=0, sharpness=0,
-               dither="Floyd-Steinberg", rotation=0, artistic="Нет"):
+               dither="Floyd-Steinberg", rotation=0, artistic="Нет",
+               border="Нет"):
     img = generate_qr(data, add_text=add_text,
                       font_path=font_path, font_size=font_size)
     if rotation:
@@ -640,6 +659,10 @@ def prepare_qr(data, add_text=False, font_path=None, font_size=16,
     img = _fit_to_printer(img)
     img = apply_filters(img, brightness, contrast, sharpness)
     img = apply_artistic_filter(img, artistic)
+    if border != "Нет":
+        from funnyprint.borders import apply_border
+        img = apply_border(img, border)
+        img = _fit_to_printer(img)
     gray = img.convert("L")
     bw = dither_image(gray, dither)
     return pil_to_funny_lines(bw), bw
@@ -647,7 +670,8 @@ def prepare_qr(data, add_text=False, font_path=None, font_size=16,
 
 def prepare_barcode(data, barcode_type="code128", add_text=True,
                     brightness=0, contrast=0, sharpness=0,
-                    dither="Floyd-Steinberg", rotation=0, artistic="Нет"):
+                    dither="Floyd-Steinberg", rotation=0,
+                    artistic="Нет", border="Нет"):
     img = generate_barcode(data, barcode_type, add_text)
     if rotation:
         img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
@@ -655,6 +679,10 @@ def prepare_barcode(data, barcode_type="code128", add_text=True,
     img = _fit_to_printer(img)
     img = apply_filters(img, brightness, contrast, sharpness)
     img = apply_artistic_filter(img, artistic)
+    if border != "Нет":
+        from funnyprint.borders import apply_border
+        img = apply_border(img, border)
+        img = _fit_to_printer(img)
     gray = img.convert("L")
     bw = dither_image(gray, dither)
     return pil_to_funny_lines(bw), bw
@@ -675,8 +703,8 @@ def add_feed_preview(img_1bit, feed_px):
 
 def prepare_batch_images(paths, brightness=0, contrast=0, sharpness=0,
                          dither="Floyd-Steinberg", rotation=0,
-                         feed_between=50, artistic="Нет"):
-    """Несколько картинок → одна длинная + funny_lines"""
+                         feed_between=50, artistic="Нет", border="Нет"):
+    from funnyprint.borders import apply_border
     images_bw = []
     for path in paths:
         img = Image.open(path)
@@ -688,7 +716,6 @@ def prepare_batch_images(paths, brightness=0, contrast=0, sharpness=0,
             img = img.convert("RGB")
         if rotation:
             img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
-        # Всегда масштабируем по ширине принтера
         w, h = img.size
         new_h = max(2, int(h * PRINTER_WIDTH / w))
         if new_h % 2:
@@ -696,17 +723,18 @@ def prepare_batch_images(paths, brightness=0, contrast=0, sharpness=0,
         img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
         img = apply_filters(img, brightness, contrast, sharpness)
         img = apply_artistic_filter(img, artistic)
+        if border != "Нет":
+            img = apply_border(img, border)
+            img = _fit_to_printer(img)
         gray = img.convert("L")
         bw = dither_image(gray, dither)
         images_bw.append(bw)
 
-    # Склеиваем в одну длинную картинку с промотками между ними
     total_h = sum(im.height for im in images_bw)
     if feed_between > 0:
         total_h += feed_between * (len(images_bw) - 1)
     if total_h % 2:
         total_h += 1
-
     combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
     y = 0
     for i, bw in enumerate(images_bw):
@@ -714,18 +742,16 @@ def prepare_batch_images(paths, brightness=0, contrast=0, sharpness=0,
         y += bw.height
         if i < len(images_bw) - 1 and feed_between > 0:
             y += feed_between
-
     return pil_to_funny_lines(combined), combined
 
 
 def prepare_batch_pdf(path, pages, brightness=0, contrast=0, sharpness=0,
                       dither="Floyd-Steinberg", rotation=0, feed_between=50,
-                      artistic="Нет"):
-    """Несколько страниц PDF → одна длинная + funny_lines"""
+                      artistic="Нет", border="Нет"):
     import fitz
+    from funnyprint.borders import apply_border
     doc = fitz.open(path)
     images_bw = []
-
     for pg in pages:
         page = doc[pg]
         zoom = PRINTER_WIDTH / page.rect.width * 2
@@ -737,10 +763,12 @@ def prepare_batch_pdf(path, pages, brightness=0, contrast=0, sharpness=0,
         img = _fit_to_printer(img)
         img = apply_filters(img, brightness, contrast, sharpness)
         img = apply_artistic_filter(img, artistic)
+        if border != "Нет":
+            img = apply_border(img, border)
+            img = _fit_to_printer(img)
         gray = img.convert("L")
         bw = dither_image(gray, dither)
         images_bw.append(bw)
-
     doc.close()
 
     total_h = sum(im.height for im in images_bw)
@@ -748,7 +776,6 @@ def prepare_batch_pdf(path, pages, brightness=0, contrast=0, sharpness=0,
         total_h += feed_between * (len(images_bw) - 1)
     if total_h % 2:
         total_h += 1
-
     combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
     y = 0
     for i, bw in enumerate(images_bw):
@@ -756,7 +783,6 @@ def prepare_batch_pdf(path, pages, brightness=0, contrast=0, sharpness=0,
         y += bw.height
         if i < len(images_bw) - 1 and feed_between > 0:
             y += feed_between
-
     return pil_to_funny_lines(combined), combined
 
 # ════════════════════════════════════════

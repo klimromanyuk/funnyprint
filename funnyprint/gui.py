@@ -127,7 +127,6 @@ class App:
             self.print_btn.set_enabled(not busy)
             st = tk.DISABLED if busy else tk.NORMAL
             self.btn_feed.config(state=st)
-            self.btn_batch.config(state=st)
             self.btn_cancel.config(state=tk.NORMAL if busy else tk.DISABLED)
             if not busy:
                 self.root.after(1500, lambda: self.print_btn.set_progress(0))
@@ -218,6 +217,8 @@ class App:
         self.file_lbl = ttk.Label(img_tab, text="Файл не выбран",
                                   wraplength=260, foreground="gray")
         self.file_lbl.pack(pady=2)
+        ttk.Button(img_tab, text="Пакетная печать (несколько файлов)",
+                   command=self.on_batch).pack(fill=tk.X, pady=5)
 
         # -- PDF --
         pdf_tab = ttk.Frame(self.tabs, padding=8)
@@ -463,6 +464,19 @@ class App:
                      textvariable=self.artistic_var,
                      state="readonly", width=18).pack(side=tk.LEFT, padx=5)
         self.artistic_var.trace_add("write", lambda *a: self._schedule())
+        
+        # Рамка
+        brf = ttk.Frame(sett)
+        brf.pack(fill=tk.X, pady=2)
+        ttk.Label(brf, text="Рамка:").pack(side=tk.LEFT)
+        self.border_var = tk.StringVar(value="Нет")
+        from funnyprint.borders import get_border_names
+        ttk.Combobox(brf, values=get_border_names(),
+                     textvariable=self.border_var,
+                     state="readonly", width=18).pack(side=tk.LEFT, padx=5)
+        self.border_var.trace_add("write", lambda *a: self._schedule())
+
+        # Дизеринг
         df = ttk.Frame(sett)
         df.pack(fill=tk.X, pady=2)
         ttk.Label(df, text="Дизеринг:").pack(side=tk.LEFT)
@@ -528,9 +542,6 @@ class App:
         self.btn_feed = ttk.Button(bf, text="Промотать бумагу",
                                    command=self.on_feed)
         self.btn_feed.pack(fill=tk.X, pady=2)
-        self.btn_batch = ttk.Button(bf, text="Пакетная печать картинок",
-                                    command=self.on_batch)
-        self.btn_batch.pack(fill=tk.X, pady=2)
 
         self.btn_cancel = tk.Button(
             bf, text="ПРЕРВАТЬ", font=("Arial", 10, "bold"),
@@ -768,6 +779,7 @@ class App:
         tab = self._get_tab()
         self._last_tab = tab
         flt = self._get_filters()
+        prep_flt = self._get_prepare_filters()
         feed = self.feed_var.get()
         try:
             if tab == 0:  # Картинка
@@ -781,7 +793,7 @@ class App:
                     self.will_print_lbl.config(
                         text="Напечатается: [выбери картинку]")
                     return
-                lines, preview = prepare_image(self.image_path, **flt)
+                lines, preview = prepare_image(self.image_path, **prep_flt)
                 self.will_print_lbl.config(
                     text=f"Напечатается: {os.path.basename(self.image_path)}")
 
@@ -804,13 +816,13 @@ class App:
                 if len(pages) == 1:
                     from funnyprint.imaging import prepare_pdf_page
                     lines, preview = prepare_pdf_page(
-                        self.pdf_path, page_num=pages[0], **flt)
+                        self.pdf_path, page_num=pages[0], **prep_flt)
                     preview = add_feed_preview(preview, feed)
                 else:
                     from funnyprint.imaging import prepare_batch_pdf
                     lines, preview = prepare_batch_pdf(
                         self.pdf_path, pages,
-                        feed_between=feed, **flt)
+                        feed_between=feed, **prep_flt)
                 self.will_print_lbl.config(
                     text=f"Напечатается: {os.path.basename(self.pdf_path)}"
                          f" ({len(pages)} стр.)")
@@ -841,6 +853,11 @@ class App:
                     sharpness=flt["sharpness"])
                 from funnyprint.imaging import apply_artistic_filter
                 img = apply_artistic_filter(img, flt.get("artistic", "Нет"))
+                border = flt.get("border", "Нет")
+                if border != "Нет":
+                    from funnyprint.borders import apply_border
+                    img = apply_border(img, border)
+                    img = _fit_to_printer(img)
                 rotation = flt["rotation"]
                 if rotation:
                     from funnyprint.imaging import _rotate_and_fit
@@ -873,7 +890,7 @@ class App:
                     bold=self.bold_var.get(),
                     italic=self.italic_var.get(),
                     align=self.align_var.get(),
-                    strip_mode=self.strip_var.get(), **flt)
+                    strip_mode=self.strip_var.get(), **prep_flt)
                 mode = " (лента)" if self.strip_var.get() else ""
                 self.will_print_lbl.config(
                     text=f"Напечатается: текст [{fn}]{mode}")
@@ -889,7 +906,7 @@ class App:
                     return
                 from funnyprint.imaging import prepare_qr
                 lines, preview = prepare_qr(
-                    data, add_text=self.qr_text_var.get(), **flt)
+                    data, add_text=self.qr_text_var.get(), **prep_flt)
                 self.will_print_lbl.config(text="Напечатается: QR-код")
 
             elif tab == 5:  # Barcode
@@ -904,7 +921,7 @@ class App:
                 from funnyprint.imaging import prepare_barcode
                 lines, preview = prepare_barcode(
                     data, barcode_type=self.bc_type_var.get(),
-                    add_text=self.bc_text_var.get(), **flt)
+                    add_text=self.bc_text_var.get(), **prep_flt)
                 self.will_print_lbl.config(text="Напечатается: штрих-код")
 
             else:
@@ -1155,7 +1172,7 @@ class App:
         try:
             from funnyprint.imaging import prepare_batch_images
             lines, preview = prepare_batch_images(
-                self.batch_paths, feed_between=feed, **flt)
+                self.batch_paths, feed_between=feed, **self._get_prepare_filters())
             from funnyprint.imaging import add_feed_preview
             preview = add_feed_preview(preview, feed)
             self.current_lines = lines
@@ -1174,7 +1191,12 @@ class App:
             dither=self.dither_var.get(),
             rotation=int(self.rotation_var.get()),
             artistic=self.artistic_var.get(),
+            border=self.border_var.get(),
         )
+
+    def _get_prepare_filters(self):
+        """Фильтры для функций prepare_*"""
+        return self._get_filters()
 
     def _parse_page_range(self, range_str, max_pages):
         """Парсит '1-3,5,7-9' → список номеров страниц (0-based)"""
