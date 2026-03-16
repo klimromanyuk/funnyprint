@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog
 
@@ -81,6 +82,7 @@ class App:
         self.current_preview = None
         self._preview_tk = None
         self._update_timer = None
+        self._preview_busy = False
         self._zoom = 1.0
         self._last_tab = -1
 
@@ -669,7 +671,7 @@ class App:
         self.root.bind("<Control-o>", lambda e: self._hotkey_open())
         self.root.bind("<Control-O>", lambda e: self._hotkey_open())
 
-        self.root.after(500, self._update_preview)
+        self.root.after(500, self._start_preview)
         # Drag & Drop
         if self._dnd_available:
             from tkinterdnd2 import DND_FILES
@@ -816,14 +818,35 @@ class App:
         if self._update_timer:
             self.root.after_cancel(self._update_timer)
         tab = self._get_tab()
-        delay = 800 if tab in (4, 5) else 300  # QR/Barcode тяжелее
-        self._update_timer = self.root.after(delay, self._update_preview)
+        delay = 800 if tab in (4, 5) else 300
+        self._update_timer = self.root.after(delay, self._start_preview)
 
     def _get_tab(self):
         try:
             return self.tabs.index(self.tabs.select())
         except Exception:
             return 0
+
+    def _start_preview(self):
+        """Запускает _update_preview в фоновом потоке."""
+        if self._preview_busy:
+            self._schedule()
+            return
+        self._preview_busy = True
+        self.loading_lbl.config(text="Загрузка...")
+        threading.Thread(target=self._bg_preview, daemon=True).start()
+
+    def _bg_preview(self):
+        try:
+            self._update_preview()
+        except Exception as e:
+            self.root.after(0, lambda: self.log(f"Ошибка превью: {e}"))
+        finally:
+            self.root.after(0, self._preview_done)
+
+    def _preview_done(self):
+        self._preview_busy = False
+        self.loading_lbl.config(text="")
 
     def _update_preview(self):
         self._update_timer = None
@@ -908,10 +931,12 @@ class App:
     # ── Хелперы превью ──
 
     def _clear_preview(self, msg=""):
-        self.canvas.delete("all")
-        self.size_lbl.config(text="")
+        def _do():
+            self.canvas.delete("all")
+            self.size_lbl.config(text="")
+            self.will_print_lbl.config(text=f"Напечатается: {msg}")
         self.current_lines = None
-        self.will_print_lbl.config(text=f"Напечатается: {msg}")
+        self.root.after(0, _do)
 
     def _apply_chunking(self, all_lines, full_preview, label):
         from funnyprint.chunked import (
@@ -924,10 +949,11 @@ class App:
             chunk = all_lines[s:min(s + MAX_CHUNK_LINES, len(all_lines))]
             from funnyprint.imaging import _lines_to_preview
             self._update_chunk_nav(total_ch, self.chunk_index)
-            self.will_print_lbl.config(
-                text=f"{label} — часть {self.chunk_index + 1}/{total_ch}")
+            self.root.after(0, lambda: self.will_print_lbl.config(
+                text=f"{label} — часть {self.chunk_index + 1}/{total_ch}"))
             return chunk, _lines_to_preview(chunk)
-        self.will_print_lbl.config(text=f"Напечатается: {label}")
+        self.root.after(0, lambda: self.will_print_lbl.config(
+            text=f"Напечатается: {label}"))
         return all_lines, full_preview
 
     def _combine_items(self, bw_images, feed_gap):
@@ -979,7 +1005,8 @@ class App:
             from funnyprint.imaging import prepare_pdf_page
             lines, preview = prepare_pdf_page(
                 self.pdf_path, page_num=pages[0], **flt)
-            self.will_print_lbl.config(text=f"Напечатается: {name}")
+            self.root.after(0, lambda: self.will_print_lbl.config(
+                text=f"Напечатается: {name}"))
             return lines, preview
 
         import fitz
@@ -1012,14 +1039,14 @@ class App:
             lines, preview = prepare_batch_pdf(
                 self.pdf_path, cp, feed_between=feed, **flt)
             self._update_chunk_nav(tc, self.chunk_index)
-            self.will_print_lbl.config(
-                text=f"{name} — часть {self.chunk_index + 1}/{tc} "
-                     f"({len(cp)} стр.)")
+            msg = (f"{name} — часть {self.chunk_index + 1}/{tc} "
+                   f"({len(cp)} стр.)")
+            self.root.after(0, lambda: self.will_print_lbl.config(text=msg))
         else:
             lines, preview = prepare_batch_pdf(
                 self.pdf_path, pages, feed_between=feed, **flt)
-            self.will_print_lbl.config(
-                text=f"Напечатается: {name} ({len(pages)} стр.)")
+            msg = f"Напечатается: {name} ({len(pages)} стр.)"
+            self.root.after(0, lambda: self.will_print_lbl.config(text=msg))
         return lines, preview
 
     def _preview_tab_richtext(self):
@@ -1086,7 +1113,8 @@ class App:
         if len(qr_items) <= 1:
             lines, preview = prepare_qr(
                 data, add_text=self.qr_text_var.get(), **flt)
-            self.will_print_lbl.config(text="Напечатается: QR-код")
+            self.root.after(0, lambda: self.will_print_lbl.config(
+                text="Напечатается: QR-код"))
             return lines, preview
         all_bw = []
         for item in qr_items:
@@ -1094,8 +1122,8 @@ class App:
                 item, add_text=self.qr_text_var.get(), **flt)
             all_bw.append(bw)
         lines, preview = self._combine_items(all_bw, self.feed_var.get())
-        self.will_print_lbl.config(
-            text=f"Напечатается: {len(qr_items)} QR-кодов")
+        msg = f"Напечатается: {len(qr_items)} QR-кодов"
+        self.root.after(0, lambda: self.will_print_lbl.config(text=msg))
         return lines, preview
 
     def _preview_tab_barcode(self):
@@ -1111,7 +1139,8 @@ class App:
             lines, preview = prepare_barcode(
                 data, barcode_type=self.bc_type_var.get(),
                 add_text=self.bc_text_var.get(), **flt)
-            self.will_print_lbl.config(text="Напечатается: штрих-код")
+            self.root.after(0, lambda: self.will_print_lbl.config(
+                text="Напечатается: штрих-код"))
             return lines, preview
         all_bw = []
         for item in items:
@@ -1123,11 +1152,12 @@ class App:
             except ValueError:
                 pass
         if not all_bw:
-            self.log("Ни один штрих-код не валиден")
+            self.root.after(0, lambda: self.log(
+                "Ни один штрих-код не валиден"))
             return None
         lines, preview = self._combine_items(all_bw, self.feed_var.get())
-        self.will_print_lbl.config(
-            text=f"Напечатается: {len(all_bw)} штрих-кодов")
+        msg = f"Напечатается: {len(all_bw)} штрих-кодов"
+        self.root.after(0, lambda: self.will_print_lbl.config(text=msg))
         return lines, preview
 
     def _show_preview(self, pil_img):
@@ -1136,15 +1166,18 @@ class App:
         w, h = pil_img.size
         zw, zh = max(1, int(w * self._zoom)), max(1, int(h * self._zoom))
         display = pil_img.convert("RGB").resize((zw, zh), Image.NEAREST)
-        self._preview_tk = ImageTk.PhotoImage(display)
-        self.canvas.delete("all")
-        self.canvas.create_image(0, 0, anchor=tk.NW, image=self._preview_tk)
-        self.canvas.configure(scrollregion=(0, 0, zw, zh))
-        mm_w = w / PRINTER_DPI * 25.4
-        mm_h = h / PRINTER_DPI * 25.4
-        self.size_lbl.config(
-            text=f"{w}x{h}px | {mm_w:.0f}x{mm_h:.0f}mm | "
-                 f"Zoom {int(self._zoom * 100)}%")
+        def _do():
+            self._preview_tk = ImageTk.PhotoImage(display)
+            self.canvas.delete("all")
+            self.canvas.create_image(0, 0, anchor=tk.NW,
+                                     image=self._preview_tk)
+            self.canvas.configure(scrollregion=(0, 0, zw, zh))
+            mm_w = w / PRINTER_DPI * 25.4
+            mm_h = h / PRINTER_DPI * 25.4
+            self.size_lbl.config(
+                text=f"{w}x{h}px | {mm_w:.0f}x{mm_h:.0f}mm | "
+                     f"Zoom {int(self._zoom * 100)}%")
+        self.root.after(0, _do)
 
     def _zoom_in(self):
         self._zoom = min(10.0, self._zoom * 1.5)
@@ -1176,21 +1209,23 @@ class App:
     def _update_chunk_nav(self, total, current):
         self.total_chunks = total
         self.chunk_index = current
-        if total <= 1:
-            self.chunk_frame.pack_forget()
-            self.chunk_print_f.pack_forget()
-            self.total_length_lbl.config(text="")
-        else:
-            self.chunk_frame.pack(side=tk.RIGHT)
-            self.chunk_lbl.config(text=f"{current + 1}/{total}")
-            self.btn_prev_chunk.config(
-                state=tk.NORMAL if current > 0 else tk.DISABLED)
-            self.btn_next_chunk.config(
-                state=tk.NORMAL if current < total - 1 else tk.DISABLED)
-            self.chunk_print_f.pack(fill=tk.X, pady=2)
-            self.total_length_lbl.config(
-                text=f"{total} частей. После каждой части\n"
-                     f"принтер делает свою промотку.")
+        def _do():
+            if total <= 1:
+                self.chunk_frame.pack_forget()
+                self.chunk_print_f.pack_forget()
+                self.total_length_lbl.config(text="")
+            else:
+                self.chunk_frame.pack(side=tk.RIGHT)
+                self.chunk_lbl.config(text=f"{current + 1}/{total}")
+                self.btn_prev_chunk.config(
+                    state=tk.NORMAL if current > 0 else tk.DISABLED)
+                self.btn_next_chunk.config(
+                    state=tk.NORMAL if current < total - 1 else tk.DISABLED)
+                self.chunk_print_f.pack(fill=tk.X, pady=2)
+                self.total_length_lbl.config(
+                    text=f"{total} частей. После каждой части\n"
+                         f"принтер делает свою промотку.")
+        self.root.after(0, _do)
 
     def _on_tab_change(self, event=None):
         if self._update_timer:
@@ -1321,7 +1356,6 @@ class App:
             return
         if self.busy:
             return
-        self._update_preview()
         if not self.current_lines:
             self.log("Нечего печатать!")
             return
