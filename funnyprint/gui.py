@@ -457,8 +457,9 @@ class App:
         sett = ttk.LabelFrame(parent, text="Настройки печати", padding=5)
         sett.pack(fill=tk.X, padx=2, pady=2)
 
-        self._slider(sett, "Яркость (принтер)", 0, 7,
-                     DEFAULT_DENSITY, "density_var", is_int=True)
+        self._slider(sett, "Интенсивность (принтер)", 0, 7,
+                     DEFAULT_DENSITY, "density_var", is_int=True,
+                     schedule=False)
         self._slider(sett, "Яркость (фильтр)", -100, 100, 0, "bright_var")
         self._slider(sett, "Контраст", -100, 100, 0, "contrast_var")
         self._slider(sett, "Резкость", -100, 100, 0, "sharp_var")
@@ -656,7 +657,7 @@ class App:
         self.root.bind("<Control-O>", lambda e: self._hotkey_open())
 
     def _slider(self, parent, label, from_, to, default, var_name,
-                is_int=False):
+                is_int=False, schedule=True):
         f = ttk.Frame(parent)
         f.pack(fill=tk.X, pady=1)
         ttk.Label(f, text=label + ":").pack(side=tk.LEFT)
@@ -668,7 +669,8 @@ class App:
 
         def _ch(v):
             lbl.config(text=str(int(float(v))))
-            self._schedule()
+            if schedule:
+                self._schedule()
         ttk.Scale(f, from_=from_, to=to, variable=var,
                   orient=tk.HORIZONTAL, command=_ch
                   ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
