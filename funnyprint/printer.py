@@ -34,6 +34,8 @@ class Printer:
         self._ctrl_q: asyncio.Queue = asyncio.Queue()
         self.battery: int | str = "?"
         self._cancel = False
+        self._overheat = False
+        self._no_paper_logged = False
 
     async def _write(self, data: bytes):
         await self.client.write_gatt_char(WRITE_UUID, data, response=False)
@@ -53,10 +55,16 @@ class Printer:
             self._ctrl_q.put_nowait(("pause", 0))
         elif pt == b"\x5a\x02":
             self.battery = data[2]
-            if data[3]:
+            if data[3] and not self._no_paper_logged:
                 self.log("⚠️ Нет бумаги!")
-            if data[5]:
-                self.log("🔥 Перегрев!")
+                self._no_paper_logged = True
+            if data[5] and not self._overheat:
+                self._overheat = True
+                self.log("🔥 Перегрев! Ждём остывания...")
+            if not data[5] and self._overheat:
+                self._overheat = False
+                self._no_paper_logged = False
+                self.log("✅ Принтер остыл")
 
     async def auth(self):
         """Подписка + handshake"""
@@ -77,19 +85,12 @@ class Printer:
 
     async def print_lines(self, funny_lines, density=3, feed_after=50):
         await self._write(pkt_density(density))
-        await asyncio.sleep(0.1)
-
+        await asyncio.sleep(0.3)
         self._cancel = False
-        # Очищаем очередь от событий прошлой печати
-        while not self._ctrl_q.empty():
-            try:
-                self._ctrl_q.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+        self._flush_ctrl()
 
         all_lines = list(funny_lines)
         real_count = len(all_lines)
-
         if feed_after > 0:
             blank = bytes(96)
             for _ in range(feed_after // 2):
@@ -97,64 +98,113 @@ class Printer:
 
         total = len(all_lines)
         await self._write(pkt_print_event(total, end=False))
+        await asyncio.sleep(0.1)
 
         cur = 0
-        wait_start = None
-        max_wait = max(30, real_count * 0.3)
+        state = "SENDING"
+        pause_count = 0
+        max_done_wait = max(60, real_count * 0.5)
 
-        while True:
-            if not self._ctrl_q.empty():
-                ev, val = await self._ctrl_q.get()
-                if ev == "lost":
-                    cur = max(0, val - 1)
-                    wait_start = None
-                    self.log(f"Повтор с строки {cur}")
-                    continue
-                elif ev == "pause":
-                    self.log("Перегрев! Пауза 5 сек...")
-                    await asyncio.sleep(5)
-                    while not self._ctrl_q.empty():
-                        try:
-                            self._ctrl_q.get_nowait()
-                        except asyncio.QueueEmpty:
-                            break
-                    self.log("Продолжаем")
-                    wait_start = None
-                    continue
-                elif ev == "done":
-                    break
-
+        while state != "DONE":
             if self._cancel:
                 self.log("Печать прервана!")
                 break
-            if cur < total:
-                if self._cancel:
-                    self.log("Печать прервана!")
+
+            if state == "PAUSED":
+                try:
+                    ev, val = await asyncio.wait_for(
+                        self._ctrl_q.get(), timeout=90)
+                except asyncio.TimeoutError:
+                    self.log("Таймаут паузы (90с)")
                     break
+
+                if ev == "done":
+                    state = "DONE"
+                    continue
+                elif ev == "pause":
+                    continue  # всё ещё на паузе
+                elif ev == "lost":
+                    pause_count += 1
+                    # Даём принтеру реально отпечатать буфер
+                    cooldown = min(8.0, 2.0 + pause_count * 0.5)
+                    await asyncio.sleep(cooldown)
+                    # Собираем все события за время cooldown
+                    latest_lost = val
+                    while True:
+                        more = self._poll_ctrl()
+                        if more is None:
+                            break
+                        if more[0] == "done":
+                            state = "DONE"
+                            break
+                        elif more[0] == "lost":
+                            latest_lost = more[1]
+                        # pause игнорируем — уже отдохнули
+                    if state == "DONE":
+                        continue
+                    cur = latest_lost
+                    state = "SENDING"
+                    if pause_count <= 3 or pause_count % 10 == 0:
+                        self.log(f"▶ Строка {cur}/{total} "
+                                 f"(пауз: {pause_count})")
+                continue
+
+            # === SENDING ===
+            ev_data = self._poll_ctrl()
+            if ev_data:
+                ev, val = ev_data
+                if ev == "done":
+                    state = "DONE"
+                    continue
+                elif ev == "lost":
+                    cur = val
+                    continue
+                elif ev == "pause":
+                    state = "PAUSED"
+                    if pause_count == 0:
+                        self.log(f"⏸ Пауза ({cur}/{total})")
+                    continue
+
+            if cur < total:
                 await self._write(pkt_print_line(cur, all_lines[cur]))
                 cur += 1
-                if self.on_progress:
+                if self.on_progress and cur <= real_count:
                     self.on_progress(min(100, 100 * cur // real_count))
                 await asyncio.sleep(0.025)
             else:
-                if wait_start is None:
-                    wait_start = asyncio.get_event_loop().time()
-                elapsed = asyncio.get_event_loop().time() - wait_start
-                if elapsed > max_wait:
-                    self.log(f"Таймаут {max_wait:.0f}с, завершаем")
+                try:
+                    ev, val = await asyncio.wait_for(
+                        self._ctrl_q.get(), timeout=max_done_wait)
+                    if ev == "done":
+                        state = "DONE"
+                    elif ev == "lost":
+                        cur = val
+                    elif ev == "pause":
+                        state = "PAUSED"
+                except asyncio.TimeoutError:
+                    self.log("Таймаут завершения")
                     break
-                await asyncio.sleep(0.5)
 
-        # Очищаем очередь от оставшихся событий
+        self._flush_ctrl()
+        self._cancel = False
+        await self._write(pkt_print_event(total, end=True))
+        if state == "DONE":
+            self.log("✅ Печать завершена!")
+        else:
+            self.log("⚠️ Печать завершена с ошибками")
+
+    def _poll_ctrl(self):
+        try:
+            return self._ctrl_q.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+
+    def _flush_ctrl(self):
         while not self._ctrl_q.empty():
             try:
                 self._ctrl_q.get_nowait()
             except asyncio.QueueEmpty:
                 break
-
-        self._cancel = False
-        await self._write(pkt_print_event(total, end=True))
-        self.log("Печать завершена!")
 
     async def feed(self, pixels=100):
         n = max(1, pixels // 2)
