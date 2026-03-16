@@ -87,6 +87,12 @@ class PrintService:
         if self.printer:
             self.printer.cancel()
 
+    @property
+    def is_connected(self):
+        return (self.printer is not None
+                and self.printer.client is not None
+                and self.printer.client.is_connected)
+
     # ── Подготовка данных ──
 
     def prepare_image(self, path, **filters):

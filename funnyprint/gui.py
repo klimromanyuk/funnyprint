@@ -2,7 +2,6 @@
 
 import asyncio
 import os
-import threading
 import tkinter as tk
 from tkinter import ttk, filedialog
 
@@ -16,7 +15,7 @@ from funnyprint.imaging import (
     prepare_image, prepare_text, get_system_fonts,
     get_strip_info, DITHER_METHODS,
 )
-from funnyprint.printer import find_and_connect
+from funnyprint.service import PrintService
 
 
 class PrintButton(tk.Canvas):
@@ -70,7 +69,6 @@ class App:
         self.root.geometry("960x780")
         self.root.minsize(700, 500)
 
-        self.printer = None
         self.connected = False
         self.busy = False
         self.image_path = None
@@ -89,15 +87,11 @@ class App:
         self.system_fonts = get_system_fonts()
         self.font_names = list(self.system_fonts.keys())
 
-        self._ble_loop = asyncio.new_event_loop()
-        threading.Thread(
-            target=self._ble_loop.run_forever, daemon=True).start()
-
         self._build_ui()
-        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _run_async(self, coro):
-        return asyncio.run_coroutine_threadsafe(coro, self._ble_loop)
+        self.service = PrintService(
+            on_log=self.log, on_progress=self._set_progress)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def log(self, msg):
         self.root.after(0, self._log_write, msg)
@@ -1297,16 +1291,15 @@ class App:
             return
         self._set_busy(True)
         self.btn_connect.config(state=tk.DISABLED)
-        self._run_async(self._do_connect())
+        self.service.run_async(self._do_connect())
 
     async def _do_connect(self):
         try:
-            self.printer = await find_and_connect(
-                on_log=self.log, on_progress=self._set_progress)
-            if self.printer:
+            ok = await self.service.connect()
+            if ok:
                 self._set_status(True)
                 self.root.after(0, lambda: self.battery_lbl.config(
-                    text=f"Батарея: {self.printer.battery}%"))
+                    text=f"Батарея: {self.service.battery}%"))
             else:
                 self._set_status(False)
         except Exception as e:
@@ -1316,17 +1309,10 @@ class App:
             self._set_busy(False)
 
     def on_disconnect(self):
-        self._run_async(self._do_disconnect())
+        self.service.run_async(self._do_disconnect())
 
     async def _do_disconnect(self):
-        try:
-            if self.printer and self.printer.client:
-                if self.printer.client.is_connected:
-                    await self.printer.client.disconnect()
-            self.log("Отключено")
-        except Exception as e:
-            self.log(f"Ошибка: {e}")
-        self.printer = None
+        await self.service.disconnect()
         self._set_status(False)
 
     def on_print(self):
@@ -1345,7 +1331,7 @@ class App:
             self.log(f"Печать части {self.chunk_index + 1}/{self.total_chunks}")
         self._set_busy(True)
         self.print_btn.set_progress(0)
-        self._run_async(self._do_print(
+        self.service.run_async(self._do_print(
             self.current_lines,
             int(self.density_var.get()),
             self.feed_var.get()))
@@ -1353,14 +1339,13 @@ class App:
     async def _do_print(self, lines, density, feed):
         try:
             self.log(f"Печать: {len(lines) * 2}px, яркость={density}")
-            await self.printer.print_lines(lines, density, feed)
+            await self.service.print_lines(lines, density, feed)
             self.root.after(0, lambda: self.battery_lbl.config(
-                text=f"Батарея: {self.printer.battery}%"))
+                text=f"Батарея: {self.service.battery}%"))
         except Exception as e:
             self.log(f"Ошибка: {e}")
-            if self.printer and self.printer.client:
-                if not self.printer.client.is_connected:
-                    self._set_status(False)
+            if not self.service.is_connected:
+                self._set_status(False)
         finally:
             self._cancel_all = False
             self._set_busy(False)
@@ -1372,11 +1357,11 @@ class App:
         if self.busy:
             return
         self._set_busy(True)
-        self._run_async(self._do_feed(self.feed_var.get()))
+        self.service.run_async(self._do_feed(self.feed_var.get()))
 
     async def _do_feed(self, px):
         try:
-            await self.printer.feed(px)
+            await self.service.feed(px)
         except Exception as e:
             self.log(f"Ошибка: {e}")
         finally:
@@ -1543,7 +1528,7 @@ class App:
         self.print_btn.set_progress(0)
         density = int(self.density_var.get())
         feed = self.feed_var.get()
-        self._run_async(
+        self.service.run_async(
             self._do_print_all_chunks(chunks_to_print, density, feed))
 
     async def _do_print_all_chunks(self, chunks, density, feed):
@@ -1561,7 +1546,7 @@ class App:
                 done_event = asyncio.Event()
                 def _do_update():
                     self._update_preview()
-                    self._ble_loop.call_soon_threadsafe(done_event.set)
+                    self.service._ble_loop.call_soon_threadsafe(done_event.set)
                 self.root.after(0, _do_update)
                 await done_event.wait()
 
@@ -1569,7 +1554,7 @@ class App:
                     self.log(f"Часть {chunk_idx + 1} пуста, пропуск")
                     continue
 
-                await self.printer.print_lines(
+                await self.service.print_lines(
                     self.current_lines, density, feed)
                 if self._cancel_all:
                     self.log("Печать прервана после части!")
@@ -1581,7 +1566,7 @@ class App:
 
             self.log(f"Печать завершена ({total} частей)")
             self.root.after(0, lambda: self.battery_lbl.config(
-                text=f"Батарея: {self.printer.battery}%"))
+                text=f"Батарея: {self.service.battery}%"))
         except Exception as e:
             self.log(f"Ошибка: {e}")
         finally:
@@ -1590,9 +1575,8 @@ class App:
 
     def _on_cancel(self):
         self._cancel_all = True
-        if self.printer:
-            self.printer.cancel()
-            self.log("Отмена печати...")
+        self.service.cancel()
+        self.log("Отмена печати...")
 
     def _on_secret(self, event=None):
         if not self.connected or self.busy:
@@ -1601,20 +1585,17 @@ class App:
         self._set_busy(True)
         self.print_btn.set_progress(0)
         lines, _ = prepare_text(SECRET_TEXT, font_size=20, align="center")
-        self._run_async(self._do_print(
+        self.service.run_async(self._do_print(
             lines, int(self.density_var.get()), self.feed_var.get()))
 
     def _on_close(self):
         if self.connected:
-            future = self._run_async(self._do_disconnect())
+            future = self.service.run_async(self._do_disconnect())
             try:
                 future.result(timeout=2)
             except Exception:
                 pass
-        try:
-            self._ble_loop.call_soon_threadsafe(self._ble_loop.stop)
-        except Exception:
-            pass
+        self.service.stop()
         self.root.destroy()
 
     def run(self):
