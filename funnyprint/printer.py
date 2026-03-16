@@ -185,11 +185,14 @@ class Printer:
                     self.log("Таймаут завершения")
                     break
 
+        cancelled = self._cancel
         self._flush_ctrl()
         self._cancel = False
         await self._write(pkt_print_event(total, end=True))
         if state == "DONE":
             self.log("✅ Печать завершена!")
+        elif cancelled:
+            self.log("🚫 Печать отменена")
         else:
             self.log("⚠️ Печать завершена с ошибками")
 
