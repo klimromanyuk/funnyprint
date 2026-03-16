@@ -134,10 +134,41 @@ class App:
         self.root.after(0, _u)
 
     def _build_ui(self):
-        # ── Подключение ──
-        conn = ttk.LabelFrame(self.root, text="Подключение", padding=5)
+        conn = self._build_connection()
         conn.pack(fill=tk.X, padx=5, pady=(5, 2))
 
+        main_pane = tk.PanedWindow(
+            self.root, orient=tk.VERTICAL,
+            sashwidth=8, sashrelief=tk.RAISED, bg="#b0b0b0",
+            sashcursor="sb_v_double_arrow")
+        main_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=2)
+
+        upper = tk.Frame(main_pane)
+        main_pane.add(upper, minsize=250)
+
+        h_pane = tk.PanedWindow(
+            upper, orient=tk.HORIZONTAL,
+            sashwidth=8, sashrelief=tk.RAISED, bg="#b0b0b0",
+            sashcursor="sb_h_double_arrow")
+        h_pane.pack(fill=tk.BOTH, expand=True)
+
+        left = self._build_left_panel(h_pane)
+        right = self._build_preview_panel(h_pane)
+        h_pane.add(left, minsize=250, width=340)
+        h_pane.add(right, minsize=250)
+
+        self._build_log(main_pane)
+        self._build_secret()
+        self._bind_global_keys()
+
+        self.root.after(500, self._start_preview)
+        if self._dnd_available:
+            from tkinterdnd2 import DND_FILES
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind('<<Drop>>', self._on_drop)
+
+    def _build_connection(self):
+        conn = ttk.LabelFrame(self.root, text="Подключение", padding=5)
         self.btn_connect = ttk.Button(conn, text="Подключить",
                                       command=self.on_connect)
         self.btn_connect.pack(side=tk.LEFT, padx=2)
@@ -151,28 +182,10 @@ class App:
         self.status_lbl.pack(side=tk.LEFT, padx=10)
         self.battery_lbl = ttk.Label(conn, text="", font=("Arial", 10))
         self.battery_lbl.pack(side=tk.RIGHT)
+        return conn
 
-        # ── Главный PanedWindow (верх/лог) ──
-        main_pane = tk.PanedWindow(
-            self.root, orient=tk.VERTICAL,
-            sashwidth=8, sashrelief=tk.RAISED, bg="#b0b0b0",
-            sashcursor="sb_v_double_arrow")
-        main_pane.pack(fill=tk.BOTH, expand=True, padx=5, pady=2)
-
-        upper = tk.Frame(main_pane)
-        main_pane.add(upper, minsize=250)
-
-        # ── Горизонтальный PanedWindow (лево/право) ──
-        h_pane = tk.PanedWindow(
-            upper, orient=tk.HORIZONTAL,
-            sashwidth=8, sashrelief=tk.RAISED, bg="#b0b0b0",
-            sashcursor="sb_h_double_arrow")
-        h_pane.pack(fill=tk.BOTH, expand=True)
-
-        # ══════ ЛЕВАЯ ПАНЕЛЬ (скроллируемая) ══════
-        left_outer = tk.Frame(h_pane)
-        h_pane.add(left_outer, minsize=250, width=340)
-
+    def _build_left_panel(self, parent):
+        left_outer = tk.Frame(parent)
         left_canvas = tk.Canvas(left_outer, highlightthickness=0)
         left_sb = ttk.Scrollbar(left_outer, orient=tk.VERTICAL,
                                 command=left_canvas.yview)
@@ -185,77 +198,88 @@ class App:
         left_sb.pack(side=tk.RIGHT, fill=tk.Y)
         left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Ширина внутреннего фрейма = ширина канваса
         def _resize_inner(e):
             left_canvas.itemconfig("inner", width=e.width)
         left_canvas.bind("<Configure>", _resize_inner)
 
-        # Колёсико внутри левой панели — всегда скроллит панель
         def _left_wheel(e):
             left_canvas.yview_scroll(-(e.delta // 120), "units")
-            return "break"  # блокируем дальнейшую обработку
+            return "break"
         left_canvas.bind("<MouseWheel>", _left_wheel)
         left.bind("<MouseWheel>", _left_wheel)
 
         def _bind_wheel_recursive(widget):
-            # Spinbox, Combobox, Scale — блокируем их собственный скролл
             widget.bind("<MouseWheel>", _left_wheel)
             for child in widget.winfo_children():
                 if not isinstance(child, (tk.Text, tk.Listbox)):
                     _bind_wheel_recursive(child)
         self.root.after(1000, lambda: _bind_wheel_recursive(left))
 
-        # Вкладки (растягиваются!)
-        self.tabs = ttk.Notebook(left)
+        self._build_tabs(left)
+        self._build_settings(left)
+        self._build_buttons(left)
+
+        self.will_print_lbl = ttk.Label(
+            left, text="", foreground="#555", wraplength=300)
+        self.will_print_lbl.pack(pady=2, padx=2)
+
+        return left_outer
+
+    def _build_tabs(self, parent):
+        self.tabs = ttk.Notebook(parent)
         self.tabs.pack(fill=tk.BOTH, expand=True, padx=2, pady=(2, 0))
         self.tabs.bind("<<NotebookTabChanged>>", self._on_tab_change)
 
-        # -- Картинка --
-        img_tab = ttk.Frame(self.tabs, padding=8)
-        self.tabs.add(img_tab, text="   Картинка   ")
-        ttk.Button(img_tab, text="Выбрать файл",
+        self._build_tab_image()
+        self._build_tab_pdf()
+        self._build_tab_richtext()
+        self._build_tab_text()
+        self._build_tab_qr()
+        self._build_tab_barcode()
+
+    def _build_tab_image(self):
+        t = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(t, text="   Картинка   ")
+        ttk.Button(t, text="Выбрать файл",
                    command=self.on_load_image).pack(fill=tk.X, pady=5)
-        self.file_lbl = ttk.Label(img_tab, text="Файл не выбран",
+        self.file_lbl = ttk.Label(t, text="Файл не выбран",
                                   wraplength=260, foreground="gray")
         self.file_lbl.pack(pady=2)
-        ttk.Button(img_tab, text="Пакетная печать (несколько файлов)",
+        ttk.Button(t, text="Пакетная печать (несколько файлов)",
                    command=self.on_batch).pack(fill=tk.X, pady=5)
 
-        # -- PDF --
-        pdf_tab = ttk.Frame(self.tabs, padding=8)
-        self.tabs.add(pdf_tab, text="   PDF   ")
-        ttk.Button(pdf_tab, text="Выбрать PDF",
+    def _build_tab_pdf(self):
+        t = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(t, text="   PDF   ")
+        ttk.Button(t, text="Выбрать PDF",
                    command=self.on_load_pdf).pack(fill=tk.X, pady=5)
-        self.pdf_lbl = ttk.Label(pdf_tab, text="PDF не выбран",
+        self.pdf_lbl = ttk.Label(t, text="PDF не выбран",
                                  wraplength=260, foreground="gray")
         self.pdf_lbl.pack(pady=2)
 
-        pg_f = ttk.Frame(pdf_tab)
+        pg_f = ttk.Frame(t)
         pg_f.pack(fill=tk.X, pady=5)
         ttk.Label(pg_f, text="Страницы:").pack(side=tk.LEFT)
         self.pdf_range_var = tk.StringVar(value="1")
-        pdf_range_entry = ttk.Entry(pg_f, textvariable=self.pdf_range_var,
-                                    font=("Arial", 11))
-        pdf_range_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
-        pdf_range_entry.bind("<KeyRelease>", lambda e: self._schedule())
+        e = ttk.Entry(pg_f, textvariable=self.pdf_range_var,
+                       font=("Arial", 11))
+        e.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5)
+        e.bind("<KeyRelease>", lambda e: self._schedule())
 
-        self.pdf_pages_lbl = ttk.Label(pdf_tab, text="",
+        self.pdf_pages_lbl = ttk.Label(t, text="",
                                        foreground="gray", font=("Arial", 8))
         self.pdf_pages_lbl.pack(anchor=tk.W)
-        ttk.Label(pdf_tab,
-                  text='Примеры: "1", "1-3", "1,3,5", "all"',
+        ttk.Label(t, text='Примеры: "1", "1-3", "1,3,5", "all"',
                   foreground="gray", font=("Arial", 8)).pack(anchor=tk.W)
-
         self.pdf_path = None
         self.pdf_page_count = 0
 
-        # -- Rich Text --
-        rt_tab = ttk.Frame(self.tabs, padding=8)
-        self.tabs.add(rt_tab, text="   Rich Text   ")
+    def _build_tab_richtext(self):
+        t = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(t, text="   Rich Text   ")
 
-        self.rt_widget = tk.Text(
-            rt_tab, height=5, width=30, wrap=tk.WORD,
-            font=("Consolas", 10), undo=True, maxundo=50)
+        self.rt_widget = tk.Text(t, height=5, width=30, wrap=tk.WORD,
+                                 font=("Consolas", 10), undo=True, maxundo=50)
         self.rt_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
         self.rt_widget.insert("1.0",
             "<b>Жирный</b> и обычный\n"
@@ -263,53 +287,36 @@ class App:
             "[] Задача\n[x] Выполнена")
         self.rt_widget.bind("<KeyRelease>", lambda e: self._schedule())
 
-        # Панель кнопок форматирования
-        rt_btn_frame = ttk.Frame(rt_tab)
-        rt_btn_frame.pack(fill=tk.X, pady=2)
-
-        rt_buttons = [
-            ("B", "b", True),
-            ("I", "i", True),
-            ("U", "u", True),
-            ("S", "s", True),
-            ("x²", "sup", True),
-            ("x₂", "sub", True),
-            ("Aa", "size:24", True),
-        ]
-        for text, tag, paired in rt_buttons:
-            btn = ttk.Button(rt_btn_frame, text=text, width=3,
-                command=lambda t=tag, p=paired: self._rt_insert_tag(t, p))
-            btn.pack(side=tk.LEFT, padx=1)
-
-        # Выравнивание
-        rt_align_frame = ttk.Frame(rt_tab)
-        rt_align_frame.pack(fill=tk.X, pady=2)
-        for label, tag in [("Лево", "left"), ("Центр", "center"),
-                           ("Право", "right")]:
-            ttk.Button(rt_align_frame, text=label, width=6,
-                command=lambda t=tag: self._rt_insert_tag(t, True)
+        bf = ttk.Frame(t)
+        bf.pack(fill=tk.X, pady=2)
+        for text, tag in [("B","b"),("I","i"),("U","u"),("S","s"),
+                          ("x²","sup"),("x₂","sub"),("Aa","size:24")]:
+            ttk.Button(bf, text=text, width=3,
+                command=lambda tg=tag: self._rt_insert_tag(tg, True)
             ).pack(side=tk.LEFT, padx=1)
 
-        # Маркеры списков
-        rt_list_frame = ttk.Frame(rt_tab)
-        rt_list_frame.pack(fill=tk.X, pady=2)
-        markers = [
-            ("☐", "[] "), ("☑", "[x] "), ("•", "• "),
-            ("–", "- "), ("▶", "> "), ("★", "★ "),
-            ("○", "○ "), ("1.", "1. "),
-        ]
-        for label, marker in markers:
-            ttk.Button(rt_list_frame, text=label, width=3,
+        af = ttk.Frame(t)
+        af.pack(fill=tk.X, pady=2)
+        for label, tag in [("Лево","left"),("Центр","center"),
+                           ("Право","right")]:
+            ttk.Button(af, text=label, width=6,
+                command=lambda tg=tag: self._rt_insert_tag(tg, True)
+            ).pack(side=tk.LEFT, padx=1)
+
+        lf = ttk.Frame(t)
+        lf.pack(fill=tk.X, pady=2)
+        for label, marker in [("☐","[] "),("☑","[x] "),("•","• "),
+                               ("–","- "),("▶","> "),("★","★ "),
+                               ("○","○ "),("1.","1. ")]:
+            ttk.Button(lf, text=label, width=3,
                 command=lambda m=marker: self._rt_insert_marker(m)
             ).pack(side=tk.LEFT, padx=1)
 
-        # Шрифт для Rich Text
-        rt_font_f = ttk.Frame(rt_tab)
-        rt_font_f.pack(fill=tk.X, pady=2)
-        ttk.Label(rt_font_f, text="Шрифт:").pack(side=tk.LEFT)
-        self.rt_font_combo = ttk.Combobox(
-            rt_font_f, values=self.font_names,
-            state="readonly", width=18)
+        ff = ttk.Frame(t)
+        ff.pack(fill=tk.X, pady=2)
+        ttk.Label(ff, text="Шрифт:").pack(side=tk.LEFT)
+        self.rt_font_combo = ttk.Combobox(ff, values=self.font_names,
+                                          state="readonly", width=18)
         self.rt_font_combo.pack(side=tk.LEFT, padx=5)
         for i, name in enumerate(self.font_names):
             if "arial" in name.lower() and "bold" not in name.lower():
@@ -318,32 +325,30 @@ class App:
         self.rt_font_combo.bind("<<ComboboxSelected>>",
                                 lambda e: self._schedule())
 
-        rt_size_f = ttk.Frame(rt_tab)
-        rt_size_f.pack(fill=tk.X, pady=2)
-        ttk.Label(rt_size_f, text="Базовый размер:").pack(side=tk.LEFT)
+        sf = ttk.Frame(t)
+        sf.pack(fill=tk.X, pady=2)
+        ttk.Label(sf, text="Базовый размер:").pack(side=tk.LEFT)
         self.rt_font_size_var = tk.IntVar(value=24)
-        ttk.Spinbox(rt_size_f, from_=8, to=96, width=4,
+        ttk.Spinbox(sf, from_=8, to=96, width=4,
                     textvariable=self.rt_font_size_var,
                     command=self._schedule).pack(side=tk.LEFT, padx=5)
 
-        ttk.Label(rt_tab,
-                  text="Подсказка: выдели текст и нажми кнопку\n"
+        ttk.Label(t, text="Подсказка: выдели текст и нажми кнопку\n"
                   "для применения тега",
                   foreground="gray", font=("Arial", 8),
                   justify=tk.LEFT).pack(anchor=tk.W, pady=2)
 
-        # -- Текст --
-        txt_tab = ttk.Frame(self.tabs, padding=8)
-        self.tabs.add(txt_tab, text="   Текст   ")
+    def _build_tab_text(self):
+        t = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(t, text="   Текст   ")
 
-        self.text_widget = tk.Text(
-            txt_tab, height=5, width=30, wrap=tk.WORD,
-            font=("Arial", 11), undo=True, maxundo=50)
+        self.text_widget = tk.Text(t, height=5, width=30, wrap=tk.WORD,
+                                   font=("Arial", 11), undo=True, maxundo=50)
         self.text_widget.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
         self.text_widget.insert("1.0", "Привет мир!")
         self.text_widget.bind("<KeyRelease>", lambda e: self._schedule())
 
-        ff = ttk.Frame(txt_tab)
+        ff = ttk.Frame(t)
         ff.pack(fill=tk.X, pady=2)
         ttk.Label(ff, text="Шрифт:").pack(side=tk.LEFT)
         self._font_search_var = tk.StringVar()
@@ -351,7 +356,7 @@ class App:
         ttk.Entry(ff, textvariable=self._font_search_var).pack(
             side=tk.LEFT, fill=tk.X, expand=True, padx=5)
 
-        flf = ttk.Frame(txt_tab)
+        flf = ttk.Frame(t)
         flf.pack(fill=tk.X, pady=(0, 4))
         self.font_listbox = tk.Listbox(flf, height=4, exportselection=False)
         fls = ttk.Scrollbar(flf, command=self.font_listbox.yview)
@@ -368,7 +373,7 @@ class App:
         self.font_listbox.bind("<<ListboxSelect>>",
                                lambda e: self._schedule())
 
-        sf = ttk.Frame(txt_tab)
+        sf = ttk.Frame(t)
         sf.pack(fill=tk.X, pady=2)
         ttk.Label(sf, text="Размер:").pack(side=tk.LEFT)
         self.font_size_var = tk.IntVar(value=24)
@@ -376,7 +381,7 @@ class App:
                     textvariable=self.font_size_var,
                     command=self._schedule).pack(side=tk.LEFT, padx=5)
 
-        bi = ttk.Frame(txt_tab)
+        bi = ttk.Frame(t)
         bi.pack(fill=tk.X, pady=2)
         self.bold_var = tk.BooleanVar()
         self.italic_var = tk.BooleanVar()
@@ -385,17 +390,17 @@ class App:
         ttk.Checkbutton(bi, text="Курсив", variable=self.italic_var,
                         command=self._schedule).pack(side=tk.LEFT, padx=5)
 
-        al = ttk.Frame(txt_tab)
+        al = ttk.Frame(t)
         al.pack(fill=tk.X, pady=2)
         ttk.Label(al, text="Выравн:").pack(side=tk.LEFT)
         self.align_var = tk.StringVar(value="left")
-        for val, txt in [("left", " Лево "), ("center", " Центр "),
-                         ("right", " Право ")]:
+        for val, txt in [("left"," Лево "),("center"," Центр "),
+                         ("right"," Право ")]:
             ttk.Radiobutton(al, text=txt, value=val,
                             variable=self.align_var,
                             command=self._schedule).pack(side=tk.LEFT, padx=2)
 
-        stf = ttk.Frame(txt_tab)
+        stf = ttk.Frame(t)
         stf.pack(fill=tk.X, pady=2)
         self.strip_var = tk.BooleanVar()
         ttk.Checkbutton(stf, text="Лента (90)",
@@ -404,52 +409,52 @@ class App:
         self.strip_info_lbl = ttk.Label(stf, text="", foreground="gray")
         self.strip_info_lbl.pack(side=tk.LEFT, padx=10)
 
-        # -- QR --
-        qr_tab = ttk.Frame(self.tabs, padding=8)
-        self.tabs.add(qr_tab, text="   QR   ")
-
-        ttk.Label(qr_tab, text="Данные:").pack(anchor=tk.W)
-        self.qr_entry = tk.Text(qr_tab, height=3, width=30,
+    def _build_tab_qr(self):
+        t = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(t, text="   QR   ")
+        ttk.Label(t, text="Данные:").pack(anchor=tk.W)
+        self.qr_entry = tk.Text(t, height=3, width=30,
                                 wrap=tk.WORD, font=("Arial", 11))
         self.qr_entry.pack(fill=tk.X, pady=(0, 5))
         self.qr_entry.insert("1.0", "https://example.com")
         self.qr_entry.bind("<KeyRelease>", lambda e: self._schedule())
-        ttk.Label(qr_tab, text="Несколько QR — каждый на новой строке",
+        ttk.Label(t, text="Несколько QR — каждый на новой строке",
                   foreground="gray", font=("Arial", 8)).pack(anchor=tk.W)
         self.qr_text_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(qr_tab, text="Добавить текст под QR",
+        ttk.Checkbutton(t, text="Добавить текст под QR",
                         variable=self.qr_text_var,
                         command=self._schedule).pack(anchor=tk.W, pady=2)
 
-        # -- Barcode --
-        bc_tab = ttk.Frame(self.tabs, padding=8)
-        self.tabs.add(bc_tab, text="   Barcode   ")
-
-        ttk.Label(bc_tab, text="Данные:").pack(anchor=tk.W)
-        self.bc_entry = tk.Text(bc_tab, height=3, width=30,
+    def _build_tab_barcode(self):
+        t = ttk.Frame(self.tabs, padding=8)
+        self.tabs.add(t, text="   Barcode   ")
+        ttk.Label(t, text="Данные:").pack(anchor=tk.W)
+        self.bc_entry = tk.Text(t, height=3, width=30,
                                 wrap=tk.WORD, font=("Arial", 11))
         self.bc_entry.pack(fill=tk.X, pady=(0, 5))
         self.bc_entry.insert("1.0", "123456789012")
         self.bc_entry.bind("<KeyRelease>", lambda e: self._schedule())
-        ttk.Label(bc_tab, text="Латиница и цифры. Несколько кодов —\nкаждый на новой строке или через запятую",
+        ttk.Label(t, text="Латиница и цифры. Несколько кодов —\n"
+                  "каждый на новой строке или через запятую",
                   foreground="gray", font=("Arial", 8)).pack(anchor=tk.W)
-        bc_type_f = ttk.Frame(bc_tab)
-        bc_type_f.pack(fill=tk.X, pady=2)
-        ttk.Label(bc_type_f, text="Тип:").pack(side=tk.LEFT)
+
+        tf = ttk.Frame(t)
+        tf.pack(fill=tk.X, pady=2)
+        ttk.Label(tf, text="Тип:").pack(side=tk.LEFT)
         self.bc_type_var = tk.StringVar(value="code128")
         from funnyprint.imaging import BARCODE_TYPES
-        ttk.Combobox(bc_type_f, values=BARCODE_TYPES,
+        ttk.Combobox(tf, values=BARCODE_TYPES,
                      textvariable=self.bc_type_var,
                      state="readonly", width=12).pack(side=tk.LEFT, padx=5)
         self.bc_type_var.trace_add("write", lambda *a: self._schedule())
 
         self.bc_text_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bc_tab, text="Показать текст",
+        ttk.Checkbutton(t, text="Показать текст",
                         variable=self.bc_text_var,
                         command=self._schedule).pack(anchor=tk.W, pady=2)
 
-        # ── Настройки (под вкладками, не внутри) ──
-        sett = ttk.LabelFrame(left, text="Настройки печати", padding=5)
+    def _build_settings(self, parent):
+        sett = ttk.LabelFrame(parent, text="Настройки печати", padding=5)
         sett.pack(fill=tk.X, padx=2, pady=2)
 
         self._slider(sett, "Яркость (принтер)", 0, 7,
@@ -458,7 +463,6 @@ class App:
         self._slider(sett, "Контраст", -100, 100, 0, "contrast_var")
         self._slider(sett, "Резкость", -100, 100, 0, "sharp_var")
 
-        # Художественный фильтр
         af = ttk.Frame(sett)
         af.pack(fill=tk.X, pady=2)
         ttk.Label(af, text="Фильтр:").pack(side=tk.LEFT)
@@ -468,8 +472,7 @@ class App:
                      textvariable=self.artistic_var,
                      state="readonly", width=18).pack(side=tk.LEFT, padx=5)
         self.artistic_var.trace_add("write", lambda *a: self._schedule())
-        
-        # Рамка
+
         brf = ttk.Frame(sett)
         brf.pack(fill=tk.X, pady=2)
         ttk.Label(brf, text="Рамка:").pack(side=tk.LEFT)
@@ -480,7 +483,6 @@ class App:
                      state="readonly", width=18).pack(side=tk.LEFT, padx=5)
         self.border_var.trace_add("write", lambda *a: self._schedule())
 
-        # Дизеринг
         df = ttk.Frame(sett)
         df.pack(fill=tk.X, pady=2)
         ttk.Label(df, text="Дизеринг:").pack(side=tk.LEFT)
@@ -489,13 +491,11 @@ class App:
                      state="readonly", width=15).pack(side=tk.LEFT, padx=5)
         self.dither_var.trace_add("write", lambda *a: self._schedule())
 
-        # Поворот
         rot_f = ttk.Frame(sett)
         rot_f.pack(fill=tk.X, pady=1)
         ttk.Label(rot_f, text="Поворот:").pack(side=tk.LEFT)
         self.rotation_var = tk.IntVar(value=0)
         self._rot_double = tk.DoubleVar(value=0)
-
         rot_spin = ttk.Spinbox(rot_f, from_=0, to=359, width=4, increment=1,
                                textvariable=self.rotation_var,
                                command=self._schedule)
@@ -506,31 +506,24 @@ class App:
         def _rot_scale_changed(v):
             self.rotation_var.set(int(float(v)))
             self._schedule()
-
         def _rot_var_changed(*a):
-            try:
-                val = self.rotation_var.get()
-                self._rot_double.set(float(val))
-            except (ValueError, tk.TclError):
-                pass
-
+            try: self._rot_double.set(float(self.rotation_var.get()))
+            except (ValueError, tk.TclError): pass
         self.rotation_var.trace_add("write", _rot_var_changed)
-
         ttk.Scale(rot_f, from_=0, to=359, variable=self._rot_double,
                   orient=tk.HORIZONTAL,
                   command=_rot_scale_changed
                   ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
 
-        # Количество копий
         cp_f = ttk.Frame(sett)
         cp_f.pack(fill=tk.X, pady=2)
         ttk.Label(cp_f, text="Копий:").pack(side=tk.LEFT)
         self.copies_var = tk.IntVar(value=1)
-        copies_spin = ttk.Spinbox(cp_f, from_=1, to=99, width=4,
-                                  textvariable=self.copies_var,
-                                  command=self._schedule)
-        copies_spin.pack(side=tk.LEFT, padx=5)
-        copies_spin.bind("<KeyRelease>", lambda e: self._schedule())
+        cs = ttk.Spinbox(cp_f, from_=1, to=99, width=4,
+                         textvariable=self.copies_var,
+                         command=self._schedule)
+        cs.pack(side=tk.LEFT, padx=5)
+        cs.bind("<KeyRelease>", lambda e: self._schedule())
         ttk.Label(cp_f, text="(дублирует контент)",
                   foreground="gray", font=("Arial", 8)).pack(side=tk.LEFT)
 
@@ -538,18 +531,18 @@ class App:
         pf.pack(fill=tk.X, pady=2)
         ttk.Label(pf, text="Промотка после:").pack(side=tk.LEFT)
         self.feed_var = tk.IntVar(value=DEFAULT_FEED_AFTER)
-        feed_spin = ttk.Spinbox(pf, from_=0, to=500, width=5,
-                                textvariable=self.feed_var,
-                                command=self._schedule)
-        feed_spin.pack(side=tk.LEFT, padx=5)
-        feed_spin.bind("<KeyRelease>", lambda e: self._schedule())
+        fs = ttk.Spinbox(pf, from_=0, to=500, width=5,
+                         textvariable=self.feed_var,
+                         command=self._schedule)
+        fs.pack(side=tk.LEFT, padx=5)
+        fs.bind("<KeyRelease>", lambda e: self._schedule())
         ttk.Label(pf, text="px").pack(side=tk.LEFT)
         ttk.Label(sett, text="(принтер также делает свою промотку\n"
                   "после каждой печати для отрыва)",
                   foreground="gray", font=("Arial", 8)).pack(anchor=tk.W)
 
-        # ── Кнопки ──
-        bf = ttk.Frame(left)
+    def _build_buttons(self, parent):
+        bf = ttk.Frame(parent)
         bf.pack(fill=tk.X, padx=2, pady=2)
 
         self.print_btn = PrintButton(bf, text="ПЕЧАТАТЬ",
@@ -584,13 +577,8 @@ class App:
         self.total_length_lbl.pack()
         self.btn_cancel.pack(fill=tk.X, pady=2)
 
-        self.will_print_lbl = ttk.Label(
-            left, text="", foreground="#555", wraplength=300)
-        self.will_print_lbl.pack(pady=2, padx=2)
-
-        # ══════ ПРАВАЯ ПАНЕЛЬ ══════
-        right = ttk.LabelFrame(h_pane, text="Предпросмотр", padding=5)
-        h_pane.add(right, minsize=250)
+    def _build_preview_panel(self, parent):
+        right = ttk.LabelFrame(parent, text="Предпросмотр", padding=5)
 
         zb = ttk.Frame(right)
         zb.pack(fill=tk.X)
@@ -602,20 +590,18 @@ class App:
                    command=self._zoom_in).pack(side=tk.LEFT)
         ttk.Button(zb, text="1:1", width=3,
                    command=self._zoom_reset).pack(side=tk.LEFT, padx=5)
-        # Навигация по чанкам
+
         self.chunk_frame = ttk.Frame(zb)
         self.chunk_frame.pack(side=tk.RIGHT)
         self.btn_prev_chunk = ttk.Button(
-            self.chunk_frame, text="◀", width=2,
-            command=self._prev_chunk)
+            self.chunk_frame, text="◀", width=2, command=self._prev_chunk)
         self.btn_prev_chunk.pack(side=tk.LEFT)
         self.chunk_lbl = ttk.Label(self.chunk_frame, text="")
         self.chunk_lbl.pack(side=tk.LEFT, padx=3)
         self.btn_next_chunk = ttk.Button(
-            self.chunk_frame, text="▶", width=2,
-            command=self._next_chunk)
+            self.chunk_frame, text="▶", width=2, command=self._next_chunk)
         self.btn_next_chunk.pack(side=tk.LEFT)
-        self.chunk_frame.pack_forget()  # скрыто по умолчанию
+        self.chunk_frame.pack_forget()
 
         cf = ttk.Frame(right)
         cf.pack(fill=tk.BOTH, expand=True)
@@ -636,10 +622,12 @@ class App:
             font=("Arial", 10, "bold"))
         self.loading_lbl.pack()
 
-        # ══════ ЛОГ ══════
+        return right
+
+    def _build_log(self, parent):
         log_frame = ttk.LabelFrame(
-            main_pane, text="Лог  (тяни серую полосу)", padding=2)
-        main_pane.add(log_frame, minsize=50)
+            parent, text="Лог  (тяни серую полосу)", padding=2)
+        parent.add(log_frame, minsize=50)
 
         li = tk.Frame(log_frame)
         li.pack(fill=tk.BOTH, expand=True)
@@ -649,10 +637,9 @@ class App:
         self.log_text.configure(yscrollcommand=ls.set)
         ls.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.pack(fill=tk.BOTH, expand=True)
-
         self._log_write("Готов. Нажми Подключить.")
 
-        # ── Секрет ──
+    def _build_secret(self):
         secret = tk.Label(self.root, text=" \u2665 ", font=("Arial", 11),
                           fg="#d0d0d0", bg="#f0f0f0", cursor="hand2")
         secret.place(relx=1.0, rely=1.0, anchor="se", x=-4, y=-2)
@@ -660,23 +647,13 @@ class App:
         secret.bind("<Enter>", lambda e: secret.config(fg="#e06060"))
         secret.bind("<Leave>", lambda e: secret.config(fg="#d0d0d0"))
 
-        # ── Глобальное колёсико ──
+    def _bind_global_keys(self):
         self.root.bind_all("<MouseWheel>", self._on_global_wheel)
-
-        # ── Горячие клавиши для любой раскладки ──
         self.root.bind_all("<Key>", self._on_global_key)
-        # Горячие клавиши приложения
         self.root.bind("<Control-p>", lambda e: self.on_print())
         self.root.bind("<Control-P>", lambda e: self.on_print())
         self.root.bind("<Control-o>", lambda e: self._hotkey_open())
         self.root.bind("<Control-O>", lambda e: self._hotkey_open())
-
-        self.root.after(500, self._start_preview)
-        # Drag & Drop
-        if self._dnd_available:
-            from tkinterdnd2 import DND_FILES
-            self.root.drop_target_register(DND_FILES)
-            self.root.dnd_bind('<<Drop>>', self._on_drop)
 
     def _slider(self, parent, label, from_, to, default, var_name,
                 is_int=False):
@@ -982,7 +959,7 @@ class App:
             self._clear_preview("[выбери картинку]")
             return None
         all_lines, full_preview = prepare_image(
-            self.image_path, **self._get_prepare_filters())
+            self.image_path, **self._get_filters())
         return self._apply_chunking(
             all_lines, full_preview, os.path.basename(self.image_path))
 
@@ -997,7 +974,7 @@ class App:
             pages = [0]
         if not pages:
             pages = [0]
-        flt = self._get_prepare_filters()
+        flt = self._get_filters()
         feed = self.feed_var.get()
         name = os.path.basename(self.pdf_path)
 
@@ -1097,7 +1074,7 @@ class App:
             font_size=self.font_size_var.get(),
             bold=self.bold_var.get(), italic=self.italic_var.get(),
             align=self.align_var.get(), strip_mode=self.strip_var.get(),
-            **self._get_prepare_filters())
+            **self._get_filters())
         mode = " (лента)" if self.strip_var.get() else ""
         return self._apply_chunking(
             all_lines, full_preview, f"текст [{fn}]{mode}")
@@ -1108,7 +1085,7 @@ class App:
             self._clear_preview("[введи данные QR]")
             return None
         from funnyprint.imaging import prepare_qr
-        flt = self._get_prepare_filters()
+        flt = self._get_filters()
         qr_items = [d.strip() for d in data.split('\n') if d.strip()]
         if len(qr_items) <= 1:
             lines, preview = prepare_qr(
@@ -1132,7 +1109,7 @@ class App:
             self._clear_preview("[введи данные штрих-кода]")
             return None
         from funnyprint.imaging import prepare_barcode
-        flt = self._get_prepare_filters()
+        flt = self._get_filters()
         items = [d.strip() for d in data.replace('\n', ',').split(',')
                  if d.strip()]
         if len(items) <= 1:
@@ -1419,7 +1396,7 @@ class App:
     def _update_batch_preview(self):
         if not self.batch_paths:
             return
-        flt = self._get_prepare_filters()
+        flt = self._get_filters()
         feed = self.feed_var.get()
         try:
             from funnyprint.chunked import needs_chunking
@@ -1469,10 +1446,6 @@ class App:
             artistic=self.artistic_var.get(),
             border=self.border_var.get(),
         )
-
-    def _get_prepare_filters(self):
-        """Фильтры для функций prepare_*"""
-        return self._get_filters()
 
     def _parse_page_range(self, range_str, max_pages):
         """Парсит '1-3,5,7-9' → список номеров страниц (0-based)"""
