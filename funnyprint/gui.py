@@ -418,7 +418,7 @@ class App:
         self.qr_entry.pack(fill=tk.X, pady=(0, 5))
         self.qr_entry.insert("1.0", "https://example.com")
         self.qr_entry.bind("<KeyRelease>", lambda e: self._schedule())
-        ttk.Label(qr_tab, text="Макс. ~2000 символов",
+        ttk.Label(qr_tab, text="Несколько QR — каждый на новой строке",
                   foreground="gray", font=("Arial", 8)).pack(anchor=tk.W)
         self.qr_text_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(qr_tab, text="Добавить текст под QR",
@@ -430,11 +430,12 @@ class App:
         self.tabs.add(bc_tab, text="   Barcode   ")
 
         ttk.Label(bc_tab, text="Данные:").pack(anchor=tk.W)
-        self.bc_entry = ttk.Entry(bc_tab, font=("Arial", 11))
+        self.bc_entry = tk.Text(bc_tab, height=3, width=30,
+                                wrap=tk.WORD, font=("Arial", 11))
         self.bc_entry.pack(fill=tk.X, pady=(0, 5))
-        self.bc_entry.insert(0, "123456789012")
+        self.bc_entry.insert("1.0", "123456789012")
         self.bc_entry.bind("<KeyRelease>", lambda e: self._schedule())
-        ttk.Label(bc_tab, text="Только латиница и цифры, макс. 48 символов",
+        ttk.Label(bc_tab, text="Латиница и цифры. Несколько кодов —\nкаждый на новой строке или через запятую",
                   foreground="gray", font=("Arial", 8)).pack(anchor=tk.W)
         bc_type_f = ttk.Frame(bc_tab)
         bc_type_f.pack(fill=tk.X, pady=2)
@@ -523,6 +524,19 @@ class App:
                   orient=tk.HORIZONTAL,
                   command=_rot_scale_changed
                   ).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+
+        # Количество копий
+        cp_f = ttk.Frame(sett)
+        cp_f.pack(fill=tk.X, pady=2)
+        ttk.Label(cp_f, text="Копий:").pack(side=tk.LEFT)
+        self.copies_var = tk.IntVar(value=1)
+        copies_spin = ttk.Spinbox(cp_f, from_=1, to=99, width=4,
+                                  textvariable=self.copies_var,
+                                  command=self._schedule)
+        copies_spin.pack(side=tk.LEFT, padx=5)
+        copies_spin.bind("<KeyRelease>", lambda e: self._schedule())
+        ttk.Label(cp_f, text="(дублирует контент)",
+                  foreground="gray", font=("Arial", 8)).pack(side=tk.LEFT)
 
         pf = ttk.Frame(sett)
         pf.pack(fill=tk.X, pady=2)
@@ -807,7 +821,9 @@ class App:
     def _schedule(self):
         if self._update_timer:
             self.root.after_cancel(self._update_timer)
-        self._update_timer = self.root.after(300, self._update_preview)
+        tab = self._get_tab()
+        delay = 800 if tab in (4, 5) else 300  # QR/Barcode тяжелее
+        self._update_timer = self.root.after(delay, self._update_preview)
 
     def _get_tab(self):
         try:
@@ -818,8 +834,12 @@ class App:
     def _update_preview(self):
         self._update_timer = None
         tab = self._get_tab()
+        copies = self.copies_var.get()
         heavy = (tab == 1 and self.pdf_path and self.pdf_page_count > 5) or \
-                (tab == 0 and self.batch_paths and len(self.batch_paths) > 10)
+                (tab == 0 and self.batch_paths and len(self.batch_paths) > 10) or \
+                copies > 5 or \
+                (tab == 4 and len(self.qr_entry.get("1.0", tk.END).strip().split('\n')) > 5) or \
+                (tab == 5 and len(self.bc_entry.get("1.0", tk.END).strip().replace('\n', ',').split(',')) > 5)
         if heavy:
             self.loading_lbl.config(text="Загрузка...")
             self.root.update_idletasks()
@@ -859,7 +879,6 @@ class App:
                 else:
                     lines = all_lines
                     preview = full_preview
-                    self._update_chunk_nav(1, 0)
                     self.will_print_lbl.config(
                         text=f"Напечатается: {os.path.basename(self.image_path)}")
 
@@ -936,7 +955,6 @@ class App:
                         lines, preview = prepare_batch_pdf(
                             self.pdf_path, pages,
                             feed_between=feed, **prep_flt)
-                        self._update_chunk_nav(1, 0)
 
             elif tab == 2:  # Rich Text
                 rt = self.rt_widget.get("1.0", tk.END).strip()
@@ -997,7 +1015,6 @@ class App:
                 else:
                     lines = all_lines
                     preview = bw
-                    self._update_chunk_nav(1, 0)
                     self.will_print_lbl.config(
                         text=f"Напечатается: rich text [{fn}]")
 
@@ -1009,7 +1026,6 @@ class App:
                     self.current_lines = None
                     self.will_print_lbl.config(
                         text="Напечатается: [введи текст]")
-                    self._update_chunk_nav(1, 0)
                     return
                 sel = self.font_listbox.curselection()
                 fn = (self.font_listbox.get(sel[0])
@@ -1041,7 +1057,6 @@ class App:
                 else:
                     lines = all_lines
                     preview = full_preview
-                    self._update_chunk_nav(1, 0)
                     mode = " (лента)" if self.strip_var.get() else ""
                     self.will_print_lbl.config(
                         text=f"Напечатается: текст [{fn}]{mode}")
@@ -1056,13 +1071,39 @@ class App:
                         text="Напечатается: [введи данные QR]")
                     return
                 from funnyprint.imaging import prepare_qr
-                lines, preview = prepare_qr(
-                    data, add_text=self.qr_text_var.get(), **prep_flt)
-                self.will_print_lbl.config(text="Напечатается: QR-код")
-                self._update_chunk_nav(1, 0)
+
+                qr_items = [d.strip() for d in data.split('\n') if d.strip()]
+                if len(qr_items) <= 1:
+                    lines, preview = prepare_qr(
+                        data, add_text=self.qr_text_var.get(), **prep_flt)
+                    self.will_print_lbl.config(text="Напечатается: QR-код")
+                else:
+                    all_bw = []
+                    for item in qr_items:
+                        _, bw = prepare_qr(
+                            item, add_text=self.qr_text_var.get(), **prep_flt)
+                        all_bw.append(bw)
+                    feed_gap = feed
+                    total_h = sum(b.height for b in all_bw)
+                    if feed_gap > 0:
+                        total_h += feed_gap * (len(all_bw) - 1)
+                    if total_h % 2:
+                        total_h += 1
+                    combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
+                    y = 0
+                    for i, bw in enumerate(all_bw):
+                        combined.paste(bw, (0, y))
+                        y += bw.height
+                        if i < len(all_bw) - 1 and feed_gap > 0:
+                            y += feed_gap
+                    from funnyprint.imaging import pil_to_funny_lines
+                    lines = pil_to_funny_lines(combined)
+                    preview = combined
+                    self.will_print_lbl.config(
+                        text=f"Напечатается: {len(qr_items)} QR-кодов")
 
             elif tab == 5:  # Barcode
-                data = self.bc_entry.get().strip()
+                data = self.bc_entry.get("1.0", tk.END).strip()
                 if not data:
                     self.canvas.delete("all")
                     self.size_lbl.config(text="")
@@ -1071,14 +1112,80 @@ class App:
                         text="Напечатается: [введи данные штрих-кода]")
                     return
                 from funnyprint.imaging import prepare_barcode
-                lines, preview = prepare_barcode(
-                    data, barcode_type=self.bc_type_var.get(),
-                    add_text=self.bc_text_var.get(), **prep_flt)
-                self.will_print_lbl.config(text="Напечатается: штрих-код")
-                self._update_chunk_nav(1, 0)
+
+                # Разделяем по запятой или переносу
+                items = [d.strip() for d in data.replace('\n', ',').split(',')
+                         if d.strip()]
+                if len(items) <= 1:
+                    lines, preview = prepare_barcode(
+                        data, barcode_type=self.bc_type_var.get(),
+                        add_text=self.bc_text_var.get(), **prep_flt)
+                    self.will_print_lbl.config(text="Напечатается: штрих-код")
+                else:
+                    all_bw = []
+                    for item in items:
+                        try:
+                            _, bw = prepare_barcode(
+                                item, barcode_type=self.bc_type_var.get(),
+                                add_text=self.bc_text_var.get(), **prep_flt)
+                            all_bw.append(bw)
+                        except ValueError:
+                            pass
+                    if not all_bw:
+                        self.log("Ни один штрих-код не валиден")
+                        return
+                    feed_gap = feed
+                    total_h = sum(b.height for b in all_bw)
+                    if feed_gap > 0:
+                        total_h += feed_gap * (len(all_bw) - 1)
+                    if total_h % 2:
+                        total_h += 1
+                    combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
+                    y = 0
+                    for i, bw in enumerate(all_bw):
+                        combined.paste(bw, (0, y))
+                        y += bw.height
+                        if i < len(all_bw) - 1 and feed_gap > 0:
+                            y += feed_gap
+                    from funnyprint.imaging import pil_to_funny_lines
+                    lines = pil_to_funny_lines(combined)
+                    preview = combined
+                    self.will_print_lbl.config(
+                        text=f"Напечатается: {len(all_bw)} штрих-кодов")
 
             else:
                 return
+
+            # Копии
+            copies = self.copies_var.get()
+            if copies > 1:
+                repeated_lines = []
+                blank = bytes(96)
+                feed_gap = feed // 2 if feed > 0 else 0
+                for c in range(copies):
+                    repeated_lines.extend(lines)
+                    if c < copies - 1 and feed_gap > 0:
+                        for _ in range(feed_gap):
+                            repeated_lines.append(blank)
+                lines = repeated_lines
+
+            # Чанкование
+            from funnyprint.chunked import needs_chunking, MAX_CHUNK_LINES, estimate_chunks
+            if needs_chunking(lines):
+                total_ch = estimate_chunks(len(lines))
+                if self.chunk_index >= total_ch:
+                    self.chunk_index = total_ch - 1
+                start = self.chunk_index * MAX_CHUNK_LINES
+                end = min(start + MAX_CHUNK_LINES, len(lines))
+                lines = lines[start:end]
+                from funnyprint.imaging import _lines_to_preview
+                preview = _lines_to_preview(lines)
+                self._update_chunk_nav(total_ch, self.chunk_index)
+            else:
+                self._update_chunk_nav(1, 0)
+                if copies > 1:
+                    from funnyprint.imaging import _lines_to_preview
+                    preview = _lines_to_preview(lines)
 
             self.current_lines = lines
             from funnyprint.imaging import add_feed_preview
