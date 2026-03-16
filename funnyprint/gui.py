@@ -651,10 +651,6 @@ class App:
     def _bind_global_keys(self):
         self.root.bind_all("<MouseWheel>", self._on_global_wheel)
         self.root.bind_all("<Key>", self._on_global_key)
-        self.root.bind("<Control-p>", lambda e: self.on_print())
-        self.root.bind("<Control-P>", lambda e: self.on_print())
-        self.root.bind("<Control-o>", lambda e: self._hotkey_open())
-        self.root.bind("<Control-O>", lambda e: self._hotkey_open())
 
     def _slider(self, parent, label, from_, to, default, var_name,
                 is_int=False, schedule=True):
@@ -688,90 +684,48 @@ class App:
 
     def _on_global_key(self, event):
         """Обработка Ctrl+клавиша в любой раскладке"""
-        if not (event.state & 0x4):  # Ctrl не нажат
+        if not (event.state & 0x4):
             return
 
         ch = event.char
         w = event.widget
+        is_text = isinstance(w, tk.Text)
+        is_entry = isinstance(w, (ttk.Entry, tk.Entry))
+        is_input = is_text or is_entry
 
-        # Ctrl+A — выделить всё
+        # Ctrl+A
         if ch == '\x01':
-            if isinstance(w, (tk.Text,)):
+            if is_text:
                 w.tag_add("sel", "1.0", "end")
                 return "break"
-            if isinstance(w, (ttk.Entry, tk.Entry)):
+            if is_entry:
                 w.selection_range(0, tk.END)
                 return "break"
 
-        # Ctrl+C — копировать
-        if ch == '\x03':
-            if isinstance(w, (tk.Text,)):
-                try:
-                    w.event_generate("<<Copy>>")
-                except Exception:
-                    pass
-                return "break"
-            if isinstance(w, (ttk.Entry, tk.Entry)):
-                try:
-                    w.event_generate("<<Copy>>")
-                except Exception:
-                    pass
-                return "break"
+        # Ctrl+C/V/X — clipboard
+        clip_map = {'\x03': "<<Copy>>", '\x16': "<<Paste>>",
+                    '\x18': "<<Cut>>"}
+        if ch in clip_map and is_input:
+            try:
+                w.event_generate(clip_map[ch])
+            except Exception:
+                pass
+            return "break"
 
-        # Ctrl+V — вставить
-        if ch == '\x16':
-            if isinstance(w, (tk.Text,)):
-                try:
-                    w.event_generate("<<Paste>>")
-                except Exception:
-                    pass
-                return "break"
-            if isinstance(w, (ttk.Entry, tk.Entry)):
-                try:
-                    w.event_generate("<<Paste>>")
-                except Exception:
-                    pass
-                return "break"
+        # Ctrl+Z/Y — undo/redo
+        if ch == '\x1a' and is_text and w.cget("undo"):
+            try: w.edit_undo()
+            except Exception: pass
+            return "break"
+        if ch == '\x19' and is_text and w.cget("undo"):
+            try: w.edit_redo()
+            except Exception: pass
+            return "break"
 
-        # Ctrl+X — вырезать
-        if ch == '\x18':
-            if isinstance(w, (tk.Text,)):
-                try:
-                    w.event_generate("<<Cut>>")
-                except Exception:
-                    pass
-                return "break"
-            if isinstance(w, (ttk.Entry, tk.Entry)):
-                try:
-                    w.event_generate("<<Cut>>")
-                except Exception:
-                    pass
-                return "break"
-
-        # Ctrl+Z — отмена
-        if ch == '\x1a':
-            if isinstance(w, tk.Text) and w.cget("undo"):
-                try:
-                    w.edit_undo()
-                except Exception:
-                    pass
-                return "break"
-
-        # Ctrl+Y — повтор
-        if ch == '\x19':
-            if isinstance(w, tk.Text) and w.cget("undo"):
-                try:
-                    w.edit_redo()
-                except Exception:
-                    pass
-                return "break"
-            
-        # Ctrl+P - печать
+        # Ctrl+P / Ctrl+O
         if ch == '\x10':
             self.on_print()
             return "break"
-
-        # Ctrl+O - открыть файл
         if ch == '\x0f':
             self._hotkey_open()
             return "break"
