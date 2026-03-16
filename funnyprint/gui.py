@@ -835,349 +835,57 @@ class App:
         self._update_timer = None
         tab = self._get_tab()
         copies = self.copies_var.get()
-        heavy = (tab == 1 and self.pdf_path and self.pdf_page_count > 5) or \
-                (tab == 0 and self.batch_paths and len(self.batch_paths) > 10) or \
-                copies > 5 or \
-                (tab == 4 and len(self.qr_entry.get("1.0", tk.END).strip().split('\n')) > 5) or \
-                (tab == 5 and len(self.bc_entry.get("1.0", tk.END).strip().replace('\n', ',').split(',')) > 5)
+        heavy = (
+            (tab == 1 and self.pdf_path and self.pdf_page_count > 5)
+            or (tab == 0 and self.batch_paths
+                and len(self.batch_paths) > 10)
+            or copies > 5
+            or (tab == 4 and len(
+                self.qr_entry.get("1.0", tk.END).strip().split('\n')) > 5)
+            or (tab == 5 and len(
+                self.bc_entry.get("1.0", tk.END).strip()
+                .replace('\n', ',').split(',')) > 5))
         if heavy:
             self.loading_lbl.config(text="Загрузка...")
             self.root.update_idletasks()
         self._last_tab = tab
-        flt = self._get_filters()
-        prep_flt = self._get_prepare_filters()
-        feed = self.feed_var.get()
+
         try:
-            if tab == 0:  # Картинка
-                if self.batch_paths:
-                    self._update_batch_preview()
-                    return
-                if not self.image_path:
-                    self.canvas.delete("all")
-                    self.size_lbl.config(text="")
-                    self.current_lines = None
-                    self.will_print_lbl.config(
-                        text="Напечатается: [выбери картинку]")
-                    return
-                all_lines, full_preview = prepare_image(
-                    self.image_path, **prep_flt)
-
-                from funnyprint.chunked import needs_chunking, MAX_CHUNK_LINES, estimate_chunks
-                if needs_chunking(all_lines):
-                    total_ch = estimate_chunks(len(all_lines))
-                    if self.chunk_index >= total_ch:
-                        self.chunk_index = total_ch - 1
-                    start = self.chunk_index * MAX_CHUNK_LINES
-                    end = min(start + MAX_CHUNK_LINES, len(all_lines))
-                    lines = all_lines[start:end]
-                    from funnyprint.imaging import _lines_to_preview
-                    preview = _lines_to_preview(lines)
-                    self._update_chunk_nav(total_ch, self.chunk_index)
-                    self.will_print_lbl.config(
-                        text=f"{os.path.basename(self.image_path)} — "
-                             f"часть {self.chunk_index + 1}/{total_ch}")
-                else:
-                    lines = all_lines
-                    preview = full_preview
-                    self.will_print_lbl.config(
-                        text=f"Напечатается: {os.path.basename(self.image_path)}")
-
-            elif tab == 1:  # PDF
-                if not self.pdf_path:
-                    self.canvas.delete("all")
-                    self.size_lbl.config(text="")
-                    self.current_lines = None
-                    self.will_print_lbl.config(
-                        text="Напечатается: [выбери PDF]")
-                    return
-                range_str = self.pdf_range_var.get().strip()
-                try:
-                    pages = self._parse_page_range(
-                        range_str, self.pdf_page_count)
-                except (ValueError, AttributeError):
-                    pages = [0]
-                if not pages:
-                    pages = [0]
-                if len(pages) == 1:
-                    from funnyprint.imaging import prepare_pdf_page
-                    lines, preview = prepare_pdf_page(
-                        self.pdf_path, page_num=pages[0], **prep_flt)
-                    preview = add_feed_preview(preview, feed)
-                else:
-                    from funnyprint.chunked import MAX_CHUNK_LINES
-                    # Оцениваем размеры страниц без рендера
-                    import fitz
-                    doc = fitz.open(self.pdf_path)
-                    page_line_counts = []
-                    for pg in pages:
-                        p = doc[pg]
-                        ratio = PRINTER_WIDTH / p.rect.width
-                        est_h = int(p.rect.height * ratio)
-                        est_lines = (est_h + 1) // 2
-                        page_line_counts.append(est_lines)
-                    doc.close()
-
-                    feed_lines = feed // 2 if feed > 0 else 0
-                    total_lines = sum(page_line_counts) + feed_lines * (len(pages) - 1)
-
-                    from funnyprint.chunked import needs_chunking, estimate_chunks
-                    if needs_chunking(total_lines):
-                        # Разбиваем на чанки по страницам
-                        chunks_pages = []
-                        current_chunk = []
-                        current_count = 0
-                        for i, lc in enumerate(page_line_counts):
-                            if current_count + lc > MAX_CHUNK_LINES and current_chunk:
-                                chunks_pages.append(current_chunk)
-                                current_chunk = []
-                                current_count = 0
-                            current_chunk.append(pages[i])
-                            current_count += lc + feed_lines
-                        if current_chunk:
-                            chunks_pages.append(current_chunk)
-
-                        total_ch = len(chunks_pages)
-                        if self.chunk_index >= total_ch:
-                            self.chunk_index = total_ch - 1
-                        chunk_pages = chunks_pages[self.chunk_index]
-
-                        from funnyprint.imaging import prepare_batch_pdf
-                        lines, preview = prepare_batch_pdf(
-                            self.pdf_path, chunk_pages,
-                            feed_between=feed, **prep_flt)
-                        self._update_chunk_nav(total_ch, self.chunk_index)
-                        self.will_print_lbl.config(
-                            text=f"{os.path.basename(self.pdf_path)} — "
-                                 f"часть {self.chunk_index + 1}/{total_ch} "
-                                 f"({len(chunk_pages)} стр.)")
-                    else:
-                        from funnyprint.imaging import prepare_batch_pdf
-                        lines, preview = prepare_batch_pdf(
-                            self.pdf_path, pages,
-                            feed_between=feed, **prep_flt)
-
-            elif tab == 2:  # Rich Text
-                rt = self.rt_widget.get("1.0", tk.END).strip()
-                if not rt:
-                    self.canvas.delete("all")
-                    self.size_lbl.config(text="")
-                    self.current_lines = None
-                    self.will_print_lbl.config(
-                        text="Напечатается: [введи rich text]")
-                    return
-                from funnyprint.richtext import render_rich_text, TextStyle
-                fn = self.rt_font_combo.get() or self.font_names[0]
-                fp = self.system_fonts.get(fn)
-                rt_style = TextStyle(
-                    font_path=fp,
-                    font_size=self.rt_font_size_var.get(),
-                    align="left")
-                img = render_rich_text(rt, rt_style)
-                from funnyprint.imaging import (
-                    apply_filters, dither_image, pil_to_funny_lines,
-                    _trim_whitespace, _fit_to_printer)
-                img = apply_filters(img,
-                    brightness=flt["brightness"],
-                    contrast=flt["contrast"],
-                    sharpness=flt["sharpness"])
-                from funnyprint.imaging import apply_artistic_filter
-                img = apply_artistic_filter(img, flt.get("artistic", "Нет"))
-                border = flt.get("border", "Нет")
-                if border != "Нет":
-                    from funnyprint.borders import apply_border
-                    img = apply_border(img, border)
-                    img = _fit_to_printer(img)
-                rotation = flt["rotation"]
-                if rotation:
-                    from funnyprint.imaging import _rotate_and_fit
-                    img = _rotate_and_fit(img, rotation)
-                else:
-                    img = _trim_whitespace(img)
-                    img = _fit_to_printer(img)
-                gray = img.convert("L")
-                bw = dither_image(gray, flt["dither"])
-                all_lines = pil_to_funny_lines(bw)
-
-                from funnyprint.chunked import needs_chunking, MAX_CHUNK_LINES, estimate_chunks
-                if needs_chunking(all_lines):
-                    total_ch = estimate_chunks(len(all_lines))
-                    if self.chunk_index >= total_ch:
-                        self.chunk_index = total_ch - 1
-                    start = self.chunk_index * MAX_CHUNK_LINES
-                    end = min(start + MAX_CHUNK_LINES, len(all_lines))
-                    lines = all_lines[start:end]
-                    from funnyprint.imaging import _lines_to_preview
-                    preview = _lines_to_preview(lines)
-                    self._update_chunk_nav(total_ch, self.chunk_index)
-                    self.will_print_lbl.config(
-                        text=f"Rich text [{fn}] — часть "
-                             f"{self.chunk_index + 1}/{total_ch}")
-                else:
-                    lines = all_lines
-                    preview = bw
-                    self.will_print_lbl.config(
-                        text=f"Напечатается: rich text [{fn}]")
-
-            elif tab == 3:  # Текст
-                text = self.text_widget.get("1.0", tk.END).strip()
-                if not text:
-                    self.canvas.delete("all")
-                    self.size_lbl.config(text="")
-                    self.current_lines = None
-                    self.will_print_lbl.config(
-                        text="Напечатается: [введи текст]")
-                    return
-                sel = self.font_listbox.curselection()
-                fn = (self.font_listbox.get(sel[0])
-                      if sel else self.font_names[0])
-                fp = self.system_fonts.get(fn)
-                all_lines, full_preview = prepare_text(
-                    text, font_path=fp,
-                    font_size=self.font_size_var.get(),
-                    bold=self.bold_var.get(),
-                    italic=self.italic_var.get(),
-                    align=self.align_var.get(),
-                    strip_mode=self.strip_var.get(), **prep_flt)
-
-                from funnyprint.chunked import needs_chunking, MAX_CHUNK_LINES, estimate_chunks
-                if needs_chunking(all_lines):
-                    total_ch = estimate_chunks(len(all_lines))
-                    if self.chunk_index >= total_ch:
-                        self.chunk_index = total_ch - 1
-                    start = self.chunk_index * MAX_CHUNK_LINES
-                    end = min(start + MAX_CHUNK_LINES, len(all_lines))
-                    lines = all_lines[start:end]
-                    from funnyprint.imaging import _lines_to_preview
-                    preview = _lines_to_preview(lines)
-                    self._update_chunk_nav(total_ch, self.chunk_index)
-                    mode = " (лента)" if self.strip_var.get() else ""
-                    self.will_print_lbl.config(
-                        text=f"Текст [{fn}]{mode} — часть "
-                             f"{self.chunk_index + 1}/{total_ch}")
-                else:
-                    lines = all_lines
-                    preview = full_preview
-                    mode = " (лента)" if self.strip_var.get() else ""
-                    self.will_print_lbl.config(
-                        text=f"Напечатается: текст [{fn}]{mode}")
-
-            elif tab == 4:  # QR
-                data = self.qr_entry.get("1.0", tk.END).strip()
-                if not data:
-                    self.canvas.delete("all")
-                    self.size_lbl.config(text="")
-                    self.current_lines = None
-                    self.will_print_lbl.config(
-                        text="Напечатается: [введи данные QR]")
-                    return
-                from funnyprint.imaging import prepare_qr
-
-                qr_items = [d.strip() for d in data.split('\n') if d.strip()]
-                if len(qr_items) <= 1:
-                    lines, preview = prepare_qr(
-                        data, add_text=self.qr_text_var.get(), **prep_flt)
-                    self.will_print_lbl.config(text="Напечатается: QR-код")
-                else:
-                    all_bw = []
-                    for item in qr_items:
-                        _, bw = prepare_qr(
-                            item, add_text=self.qr_text_var.get(), **prep_flt)
-                        all_bw.append(bw)
-                    feed_gap = feed
-                    total_h = sum(b.height for b in all_bw)
-                    if feed_gap > 0:
-                        total_h += feed_gap * (len(all_bw) - 1)
-                    if total_h % 2:
-                        total_h += 1
-                    combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
-                    y = 0
-                    for i, bw in enumerate(all_bw):
-                        combined.paste(bw, (0, y))
-                        y += bw.height
-                        if i < len(all_bw) - 1 and feed_gap > 0:
-                            y += feed_gap
-                    from funnyprint.imaging import pil_to_funny_lines
-                    lines = pil_to_funny_lines(combined)
-                    preview = combined
-                    self.will_print_lbl.config(
-                        text=f"Напечатается: {len(qr_items)} QR-кодов")
-
-            elif tab == 5:  # Barcode
-                data = self.bc_entry.get("1.0", tk.END).strip()
-                if not data:
-                    self.canvas.delete("all")
-                    self.size_lbl.config(text="")
-                    self.current_lines = None
-                    self.will_print_lbl.config(
-                        text="Напечатается: [введи данные штрих-кода]")
-                    return
-                from funnyprint.imaging import prepare_barcode
-
-                # Разделяем по запятой или переносу
-                items = [d.strip() for d in data.replace('\n', ',').split(',')
-                         if d.strip()]
-                if len(items) <= 1:
-                    lines, preview = prepare_barcode(
-                        data, barcode_type=self.bc_type_var.get(),
-                        add_text=self.bc_text_var.get(), **prep_flt)
-                    self.will_print_lbl.config(text="Напечатается: штрих-код")
-                else:
-                    all_bw = []
-                    for item in items:
-                        try:
-                            _, bw = prepare_barcode(
-                                item, barcode_type=self.bc_type_var.get(),
-                                add_text=self.bc_text_var.get(), **prep_flt)
-                            all_bw.append(bw)
-                        except ValueError:
-                            pass
-                    if not all_bw:
-                        self.log("Ни один штрих-код не валиден")
-                        return
-                    feed_gap = feed
-                    total_h = sum(b.height for b in all_bw)
-                    if feed_gap > 0:
-                        total_h += feed_gap * (len(all_bw) - 1)
-                    if total_h % 2:
-                        total_h += 1
-                    combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
-                    y = 0
-                    for i, bw in enumerate(all_bw):
-                        combined.paste(bw, (0, y))
-                        y += bw.height
-                        if i < len(all_bw) - 1 and feed_gap > 0:
-                            y += feed_gap
-                    from funnyprint.imaging import pil_to_funny_lines
-                    lines = pil_to_funny_lines(combined)
-                    preview = combined
-                    self.will_print_lbl.config(
-                        text=f"Напечатается: {len(all_bw)} штрих-кодов")
-
-            else:
+            _handlers = [
+                self._preview_tab_image, self._preview_tab_pdf,
+                self._preview_tab_richtext, self._preview_tab_text,
+                self._preview_tab_qr, self._preview_tab_barcode,
+            ]
+            if tab >= len(_handlers):
+                return
+            result = _handlers[tab]()
+            if result is None:
+                self.loading_lbl.config(text="")
                 return
 
-            # Копии
-            copies = self.copies_var.get()
-            if copies > 1:
-                repeated_lines = []
-                blank = bytes(96)
-                feed_gap = feed // 2 if feed > 0 else 0
-                for c in range(copies):
-                    repeated_lines.extend(lines)
-                    if c < copies - 1 and feed_gap > 0:
-                        for _ in range(feed_gap):
-                            repeated_lines.append(blank)
-                lines = repeated_lines
+            lines, preview = result
 
-            # Чанкование
-            from funnyprint.chunked import needs_chunking, MAX_CHUNK_LINES, estimate_chunks
+            # Копии
+            if copies > 1:
+                feed = self.feed_var.get()
+                repeated = []
+                blank = bytes(96)
+                gap = feed // 2 if feed > 0 else 0
+                for c in range(copies):
+                    repeated.extend(lines)
+                    if c < copies - 1 and gap > 0:
+                        repeated.extend(blank for _ in range(gap))
+                lines = repeated
+
+            # Финальное чанкование
+            from funnyprint.chunked import (
+                needs_chunking, MAX_CHUNK_LINES, estimate_chunks)
             if needs_chunking(lines):
                 total_ch = estimate_chunks(len(lines))
                 if self.chunk_index >= total_ch:
                     self.chunk_index = total_ch - 1
-                start = self.chunk_index * MAX_CHUNK_LINES
-                end = min(start + MAX_CHUNK_LINES, len(lines))
-                lines = lines[start:end]
+                s = self.chunk_index * MAX_CHUNK_LINES
+                lines = lines[s:min(s + MAX_CHUNK_LINES, len(lines))]
                 from funnyprint.imaging import _lines_to_preview
                 preview = _lines_to_preview(lines)
                 self._update_chunk_nav(total_ch, self.chunk_index)
@@ -1189,9 +897,9 @@ class App:
 
             self.current_lines = lines
             from funnyprint.imaging import add_feed_preview
-            preview_with_feed = add_feed_preview(preview, feed)
-            self.current_preview = preview_with_feed
-            self._show_preview(preview_with_feed)
+            self.current_preview = add_feed_preview(
+                preview, self.feed_var.get())
+            self._show_preview(self.current_preview)
             self.loading_lbl.config(text="")
 
         except ValueError as e:
@@ -1202,6 +910,231 @@ class App:
         except Exception as e:
             self.log(f"Ошибка предпросмотра: {e}")
             self.loading_lbl.config(text="")
+
+    # ── Хелперы превью ──
+
+    def _clear_preview(self, msg=""):
+        self.canvas.delete("all")
+        self.size_lbl.config(text="")
+        self.current_lines = None
+        self.will_print_lbl.config(text=f"Напечатается: {msg}")
+
+    def _apply_chunking(self, all_lines, full_preview, label):
+        from funnyprint.chunked import (
+            needs_chunking, MAX_CHUNK_LINES, estimate_chunks)
+        if needs_chunking(all_lines):
+            total_ch = estimate_chunks(len(all_lines))
+            if self.chunk_index >= total_ch:
+                self.chunk_index = total_ch - 1
+            s = self.chunk_index * MAX_CHUNK_LINES
+            chunk = all_lines[s:min(s + MAX_CHUNK_LINES, len(all_lines))]
+            from funnyprint.imaging import _lines_to_preview
+            self._update_chunk_nav(total_ch, self.chunk_index)
+            self.will_print_lbl.config(
+                text=f"{label} — часть {self.chunk_index + 1}/{total_ch}")
+            return chunk, _lines_to_preview(chunk)
+        self.will_print_lbl.config(text=f"Напечатается: {label}")
+        return all_lines, full_preview
+
+    def _combine_items(self, bw_images, feed_gap):
+        total_h = sum(b.height for b in bw_images)
+        if feed_gap > 0:
+            total_h += feed_gap * (len(bw_images) - 1)
+        if total_h % 2:
+            total_h += 1
+        combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
+        y = 0
+        for i, bw in enumerate(bw_images):
+            combined.paste(bw, (0, y))
+            y += bw.height
+            if i < len(bw_images) - 1 and feed_gap > 0:
+                y += feed_gap
+        from funnyprint.imaging import pil_to_funny_lines
+        return pil_to_funny_lines(combined), combined
+
+    # ── Методы вкладок (возвращают (lines, preview) или None) ──
+
+    def _preview_tab_image(self):
+        if self.batch_paths:
+            self._update_batch_preview()
+            return None
+        if not self.image_path:
+            self._clear_preview("[выбери картинку]")
+            return None
+        all_lines, full_preview = prepare_image(
+            self.image_path, **self._get_prepare_filters())
+        return self._apply_chunking(
+            all_lines, full_preview, os.path.basename(self.image_path))
+
+    def _preview_tab_pdf(self):
+        if not self.pdf_path:
+            self._clear_preview("[выбери PDF]")
+            return None
+        range_str = self.pdf_range_var.get().strip()
+        try:
+            pages = self._parse_page_range(range_str, self.pdf_page_count)
+        except (ValueError, AttributeError):
+            pages = [0]
+        if not pages:
+            pages = [0]
+        flt = self._get_prepare_filters()
+        feed = self.feed_var.get()
+        name = os.path.basename(self.pdf_path)
+
+        if len(pages) == 1:
+            from funnyprint.imaging import prepare_pdf_page
+            lines, preview = prepare_pdf_page(
+                self.pdf_path, page_num=pages[0], **flt)
+            self.will_print_lbl.config(text=f"Напечатается: {name}")
+            return lines, preview
+
+        import fitz
+        from funnyprint.chunked import MAX_CHUNK_LINES, needs_chunking
+        from funnyprint.imaging import prepare_batch_pdf
+
+        doc = fitz.open(self.pdf_path)
+        plc = []
+        for pg in pages:
+            p = doc[pg]
+            plc.append(
+                (int(p.rect.height * PRINTER_WIDTH / p.rect.width) + 1) // 2)
+        doc.close()
+
+        fl = feed // 2 if feed > 0 else 0
+        if needs_chunking(sum(plc) + fl * (len(pages) - 1)):
+            chunks_pages, cur_ch, cur_cnt = [], [], 0
+            for i, lc in enumerate(plc):
+                if cur_cnt + lc > MAX_CHUNK_LINES and cur_ch:
+                    chunks_pages.append(cur_ch)
+                    cur_ch, cur_cnt = [], 0
+                cur_ch.append(pages[i])
+                cur_cnt += lc + fl
+            if cur_ch:
+                chunks_pages.append(cur_ch)
+            tc = len(chunks_pages)
+            if self.chunk_index >= tc:
+                self.chunk_index = tc - 1
+            cp = chunks_pages[self.chunk_index]
+            lines, preview = prepare_batch_pdf(
+                self.pdf_path, cp, feed_between=feed, **flt)
+            self._update_chunk_nav(tc, self.chunk_index)
+            self.will_print_lbl.config(
+                text=f"{name} — часть {self.chunk_index + 1}/{tc} "
+                     f"({len(cp)} стр.)")
+        else:
+            lines, preview = prepare_batch_pdf(
+                self.pdf_path, pages, feed_between=feed, **flt)
+            self.will_print_lbl.config(
+                text=f"Напечатается: {name} ({len(pages)} стр.)")
+        return lines, preview
+
+    def _preview_tab_richtext(self):
+        rt = self.rt_widget.get("1.0", tk.END).strip()
+        if not rt:
+            self._clear_preview("[введи rich text]")
+            return None
+        from funnyprint.richtext import render_rich_text, TextStyle
+        from funnyprint.imaging import (
+            apply_filters, apply_artistic_filter, dither_image,
+            pil_to_funny_lines, _trim_whitespace, _fit_to_printer,
+            _rotate_and_fit,
+        )
+        fn = self.rt_font_combo.get() or self.font_names[0]
+        fp = self.system_fonts.get(fn)
+        img = render_rich_text(
+            rt, TextStyle(font_path=fp,
+                          font_size=self.rt_font_size_var.get(),
+                          align="left"))
+        flt = self._get_filters()
+        img = apply_filters(img, brightness=flt["brightness"],
+                            contrast=flt["contrast"],
+                            sharpness=flt["sharpness"])
+        img = apply_artistic_filter(img, flt.get("artistic", "Нет"))
+        border = flt.get("border", "Нет")
+        if border != "Нет":
+            from funnyprint.borders import apply_border
+            img = apply_border(img, border)
+            img = _fit_to_printer(img)
+        if flt["rotation"]:
+            img = _rotate_and_fit(img, flt["rotation"])
+        else:
+            img = _trim_whitespace(img)
+            img = _fit_to_printer(img)
+        bw = dither_image(img.convert("L"), flt["dither"])
+        return self._apply_chunking(
+            pil_to_funny_lines(bw), bw, f"rich text [{fn}]")
+
+    def _preview_tab_text(self):
+        text = self.text_widget.get("1.0", tk.END).strip()
+        if not text:
+            self._clear_preview("[введи текст]")
+            return None
+        sel = self.font_listbox.curselection()
+        fn = self.font_listbox.get(sel[0]) if sel else self.font_names[0]
+        all_lines, full_preview = prepare_text(
+            text, font_path=self.system_fonts.get(fn),
+            font_size=self.font_size_var.get(),
+            bold=self.bold_var.get(), italic=self.italic_var.get(),
+            align=self.align_var.get(), strip_mode=self.strip_var.get(),
+            **self._get_prepare_filters())
+        mode = " (лента)" if self.strip_var.get() else ""
+        return self._apply_chunking(
+            all_lines, full_preview, f"текст [{fn}]{mode}")
+
+    def _preview_tab_qr(self):
+        data = self.qr_entry.get("1.0", tk.END).strip()
+        if not data:
+            self._clear_preview("[введи данные QR]")
+            return None
+        from funnyprint.imaging import prepare_qr
+        flt = self._get_prepare_filters()
+        qr_items = [d.strip() for d in data.split('\n') if d.strip()]
+        if len(qr_items) <= 1:
+            lines, preview = prepare_qr(
+                data, add_text=self.qr_text_var.get(), **flt)
+            self.will_print_lbl.config(text="Напечатается: QR-код")
+            return lines, preview
+        all_bw = []
+        for item in qr_items:
+            _, bw = prepare_qr(
+                item, add_text=self.qr_text_var.get(), **flt)
+            all_bw.append(bw)
+        lines, preview = self._combine_items(all_bw, self.feed_var.get())
+        self.will_print_lbl.config(
+            text=f"Напечатается: {len(qr_items)} QR-кодов")
+        return lines, preview
+
+    def _preview_tab_barcode(self):
+        data = self.bc_entry.get("1.0", tk.END).strip()
+        if not data:
+            self._clear_preview("[введи данные штрих-кода]")
+            return None
+        from funnyprint.imaging import prepare_barcode
+        flt = self._get_prepare_filters()
+        items = [d.strip() for d in data.replace('\n', ',').split(',')
+                 if d.strip()]
+        if len(items) <= 1:
+            lines, preview = prepare_barcode(
+                data, barcode_type=self.bc_type_var.get(),
+                add_text=self.bc_text_var.get(), **flt)
+            self.will_print_lbl.config(text="Напечатается: штрих-код")
+            return lines, preview
+        all_bw = []
+        for item in items:
+            try:
+                _, bw = prepare_barcode(
+                    item, barcode_type=self.bc_type_var.get(),
+                    add_text=self.bc_text_var.get(), **flt)
+                all_bw.append(bw)
+            except ValueError:
+                pass
+        if not all_bw:
+            self.log("Ни один штрих-код не валиден")
+            return None
+        lines, preview = self._combine_items(all_bw, self.feed_var.get())
+        self.will_print_lbl.config(
+            text=f"Напечатается: {len(all_bw)} штрих-кодов")
+        return lines, preview
 
     def _show_preview(self, pil_img):
         if not pil_img:
