@@ -17,6 +17,7 @@ from funnyprint.imaging import (
     get_strip_info, DITHER_METHODS,
 )
 from funnyprint.service import PrintService
+from funnyprint.document_engine import DocumentLayout
 
 
 class PrintButton(tk.Canvas):
@@ -88,7 +89,8 @@ class App:
         self._items = None
         self._preview_label = ""
         self._items_cache_key = None
-        self._chunks_cache = None  # готовые чанки, не пересчитываем при навигации
+        self._chunks_cache = None  # legacy; будет убрано после перевода на layout engine
+        self._document_layout = None
 
         self.system_fonts = get_system_fonts()
         self.font_names = list(self.system_fonts.keys())
@@ -755,6 +757,7 @@ class App:
         if self._update_timer:
             self.root.after_cancel(self._update_timer)
         tab = self._get_tab()
+        self._document_layout = None
         delay = 800 if tab in (4, 5) else 300
         self._update_timer = self.root.after(delay, self._start_preview)
 
@@ -816,30 +819,40 @@ class App:
                 chunk_by_items)
             from funnyprint.imaging import _lines_to_preview
 
-            # Собираем items
+            # Базовые items документа:
+            # если вкладка уже подготовила несколько item'ов — используем их,
+            # иначе считаем весь результат одним item.
             if self._items and len(self._items) > 1:
-                items = list(self._items)
+                items = [list(item) for item in self._items]
             else:
-                items = [list(lines)]
+                items = [list(lines)] if lines else []
 
-            # Копии = повтор items
-            if copies > 1:
-                base = list(items)
-                items = []
-                for _ in range(copies):
-                    items.extend(base)
+            # Layout отвечает за copies и промежутки между item'ами.
+            layout = self.service.build_layout(
+                items,
+                copies=copies,
+                feed_px=feed,
+            )
+            self._document_layout = layout
 
-            # Склеиваем в чанки по границам items
-            chunks = chunk_by_items(items, gap)
-            self._chunks_cache = chunks
-            total_ch = len(chunks)
+            total_ch = layout.chunk_count
+            if total_ch <= 0:
+                total_ch = 1
+
             if self.chunk_index >= total_ch:
                 self.chunk_index = total_ch - 1
+            if self.chunk_index < 0:
+                self.chunk_index = 0
 
-            lines = chunks[self.chunk_index]
+            lines = layout.assemble_chunk_lines(self.chunk_index)
+
+            # Пока preview по-прежнему строим из lines.
             if total_ch > 1 or copies > 1 or (
                     self._items and len(self._items) > 1):
                 preview = _lines_to_preview(lines)
+
+            # Оставляем legacy-кэш совместимости на переходный этап
+            self._chunks_cache = None
 
             self._update_chunk_nav(total_ch, self.chunk_index)
 
@@ -878,6 +891,7 @@ class App:
             self.size_lbl.config(text="")
             self.will_print_lbl.config(text=f"Напечатается: {msg}")
         self.current_lines = None
+        self._document_layout = None
         self.root.after(0, _do)
 
     def _combine_items(self, bw_images, feed_gap):
@@ -1098,20 +1112,28 @@ class App:
             self._show_chunk()
 
     def _show_chunk(self):
-        """Быстрое переключение чанка без перерендера."""
-        if not self._chunks_cache:
+        """Быстрое переключение чанка без полного перерендера документа."""
+        if not self._document_layout:
             self._start_preview()
             return
-        if self.chunk_index >= len(self._chunks_cache):
-            self.chunk_index = len(self._chunks_cache) - 1
-        lines = self._chunks_cache[self.chunk_index]
+
+        total = self._document_layout.chunk_count
+        if total <= 0:
+            total = 1
+
+        if self.chunk_index >= total:
+            self.chunk_index = total - 1
+        if self.chunk_index < 0:
+            self.chunk_index = 0
+
+        lines = self._document_layout.assemble_chunk_lines(self.chunk_index)
         from funnyprint.imaging import _lines_to_preview, add_feed_preview
         preview = _lines_to_preview(lines)
         self.current_lines = lines
         self.current_preview = add_feed_preview(preview, self.feed_var.get())
         self._show_preview(self.current_preview)
-        total = len(self._chunks_cache)
         self._update_chunk_nav(total, self.chunk_index)
+
         copies = self.copies_var.get()
         label = self._preview_label or ""
         if total > 1:
@@ -1147,6 +1169,7 @@ class App:
         if self._update_timer:
             self.root.after_cancel(self._update_timer)
         self.chunk_index = 0
+        self._document_layout = None
         self._update_chunk_nav(1, 0)
         self._update_timer = self.root.after(200, self._start_preview)
 
@@ -1472,27 +1495,23 @@ class App:
                     break
                 self.log(f"Часть {chunk_idx + 1} [{i + 1}/{total}]")
 
-                # Переключаем на нужный чанк и обновляем данные
-                self.chunk_index = chunk_idx
-                # Обновляем превью синхронно через событие
-                done_event = asyncio.Event()
-                def _do_update():
-                    def _bg():
-                        try:
-                            self._update_preview()
-                        finally:
-                            self.service._ble_loop.call_soon_threadsafe(
-                                done_event.set)
-                    threading.Thread(target=_bg, daemon=True).start()
-                self.root.after(0, _do_update)
-                await done_event.wait()
+                if not self._document_layout:
+                    self.log("Нет готового layout документа, обнови предпросмотр")
+                    break
 
-                if not self.current_lines:
+                self.chunk_index = chunk_idx
+                lines = self._document_layout.assemble_chunk_lines(chunk_idx)
+
+                if not lines:
                     self.log(f"Часть {chunk_idx + 1} пуста, пропуск")
                     continue
 
-                await self.service.print_lines(
-                    self.current_lines, density, feed)
+                # Обновляем UI, чтобы пользователь видел текущий печатаемый чанк
+                self.current_lines = lines
+                self.root.after(0, self._show_chunk)
+
+                await self.service.print_lines(lines, density, feed)
+
                 if self._cancel_all:
                     self.log("Печать прервана после части!")
                     break
