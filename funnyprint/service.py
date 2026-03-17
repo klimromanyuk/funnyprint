@@ -18,6 +18,7 @@ from funnyprint.imaging import (
 )
 from funnyprint.printer import find_and_connect, Printer
 from funnyprint.chunked import needs_chunking, MAX_CHUNK_LINES, estimate_chunks
+from funnyprint.document_engine import DocumentLayout, LayoutSettings
 
 
 class PrintService:
@@ -125,6 +126,24 @@ class PrintService:
 
     def prepare_batch_images_chunked(self, paths, **kwargs):
         return prepare_batch_images_chunked(paths, **kwargs)
+
+    def build_layout(self, items, copies=1, feed_px=0):
+        """Строит layout-документ поверх уже готовых items.
+
+        items: list[list[bytes]]
+        feed_px: визуальный/логический промежуток между item'ами в пикселях;
+                 переводится в funny_lines
+        """
+        gap_lines = feed_px // 2 if feed_px > 0 else 0
+        layout = DocumentLayout(
+            items=[list(item) for item in items] if items else [],
+            settings=LayoutSettings(
+                copies=max(1, int(copies)),
+                gap_lines=gap_lines,
+            ),
+        )
+        layout.rebuild()
+        return layout
 
     # ── Утилиты ──
 
