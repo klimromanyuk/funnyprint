@@ -130,16 +130,15 @@ class PrintService:
     def build_layout(self, items, copies=1, feed_px=0):
         """Строит layout-документ поверх уже готовых items.
 
-        items: list[list[bytes]]
-        feed_px: визуальный/логический промежуток между item'ами в пикселях;
-                 переводится в funny_lines
+        ВАЖНО:
+        feed_px здесь больше не используется как межэлементный gap.
+        Он должен быть уже встроен в каждый item на этапе подготовки списка items.
         """
-        gap_lines = feed_px // 2 if feed_px > 0 else 0
         layout = DocumentLayout(
             items=[list(item) for item in items] if items else [],
             settings=LayoutSettings(
                 copies=max(1, int(copies)),
-                gap_lines=gap_lines,
+                gap_lines=0,
             ),
         )
         layout.rebuild()

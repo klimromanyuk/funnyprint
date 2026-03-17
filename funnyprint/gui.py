@@ -761,6 +761,34 @@ class App:
         delay = 800 if tab in (4, 5) else 300
         self._update_timer = self.root.after(delay, self._start_preview)
 
+    def _safe_int(self, var, default=0):
+        try:
+            value = var.get()
+            if value in ("", None):
+                return default
+            return int(value)
+        except Exception:
+            return default
+
+    def _safe_float(self, var, default=0.0):
+        try:
+            value = var.get()
+            if value in ("", None):
+                return default
+            return float(value)
+        except Exception:
+            return default
+
+    def _append_feed_to_item(self, lines, feed_px):
+        """Возвращает новый item: lines + feed в конце."""
+        base = list(lines) if lines else []
+        feed_lines = max(0, feed_px // 2)
+        if feed_lines <= 0:
+            return base
+        blank = bytes(96)
+        base.extend(blank for _ in range(feed_lines))
+        return base
+
     def _get_tab(self):
         try:
             return self.tabs.index(self.tabs.select())
@@ -810,28 +838,28 @@ class App:
                 return
 
             lines, preview = result
-            feed = self.feed_var.get()
+            feed = self._safe_int(self.feed_var, DEFAULT_FEED_AFTER)
             gap = feed // 2 if feed > 0 else 0
-            copies = self.copies_var.get()
+            copies = self._safe_int(self.copies_var, 1)
 
             from funnyprint.chunked import (
                 needs_chunking, MAX_CHUNK_LINES, estimate_chunks,
                 chunk_by_items)
             from funnyprint.imaging import _lines_to_preview
 
-            # Базовые items документа:
-            # если вкладка уже подготовила несколько item'ов — используем их,
-            # иначе считаем весь результат одним item.
+            # Каждый item должен уже содержать feed в конце.
             if self._items and len(self._items) > 1:
-                items = [list(item) for item in self._items]
+                items = [
+                    self._append_feed_to_item(item, feed)
+                    for item in self._items
+                ]
             else:
-                items = [list(lines)] if lines else []
+                items = [self._append_feed_to_item(lines, feed)] if lines else []
 
-            # Layout отвечает за copies и промежутки между item'ами.
             layout = self.service.build_layout(
                 items,
                 copies=copies,
-                feed_px=feed,
+                feed_px=0,
             )
             self._document_layout = layout
 
@@ -869,8 +897,14 @@ class App:
                 lambda l=label: self.will_print_lbl.config(text=l))
 
             self.current_lines = lines
-            from funnyprint.imaging import add_feed_preview
-            self.current_preview = add_feed_preview(preview, feed)
+
+            if self._document_layout is not None:
+                # Feed уже встроен в каждый item, не добавляем его ещё раз к чанку.
+                self.current_preview = preview
+            else:
+                from funnyprint.imaging import add_feed_preview
+                self.current_preview = add_feed_preview(preview, feed)
+
             self._show_preview(self.current_preview)
             self.loading_lbl.config(text="")
 
@@ -1127,14 +1161,14 @@ class App:
             self.chunk_index = 0
 
         lines = self._document_layout.assemble_chunk_lines(self.chunk_index)
-        from funnyprint.imaging import _lines_to_preview, add_feed_preview
+        from funnyprint.imaging import _lines_to_preview
         preview = _lines_to_preview(lines)
         self.current_lines = lines
-        self.current_preview = add_feed_preview(preview, self.feed_var.get())
+        self.current_preview = preview
         self._show_preview(self.current_preview)
         self._update_chunk_nav(total, self.chunk_index)
 
-        copies = self.copies_var.get()
+        copies = self._safe_int(self.copies_var, 1)
         label = self._preview_label or ""
         if total > 1:
             label = f"{label} — часть {self.chunk_index + 1}/{total}"
@@ -1306,8 +1340,8 @@ class App:
         self.print_btn.set_progress(0)
         self.service.run_async(self._do_print(
             self.current_lines,
-            int(self.density_var.get()),
-            self.feed_var.get()))
+            self._safe_int(self.density_var, DEFAULT_DENSITY),
+            self._safe_int(self.feed_var, DEFAULT_FEED_AFTER)))
 
     async def _do_print(self, lines, density, feed):
         try:
@@ -1330,7 +1364,8 @@ class App:
         if self.busy:
             return
         self._set_busy(True)
-        self.service.run_async(self._do_feed(self.feed_var.get()))
+        self.service.run_async(
+            self._do_feed(self._safe_int(self.feed_var, DEFAULT_FEED_AFTER)))
 
     async def _do_feed(self, px):
         try:
@@ -1386,11 +1421,11 @@ class App:
 
     def _get_filters(self):
         return dict(
-            brightness=int(self.bright_var.get()),
-            contrast=int(self.contrast_var.get()),
-            sharpness=int(self.sharp_var.get()),
+            brightness=self._safe_int(self.bright_var, 0),
+            contrast=self._safe_int(self.contrast_var, 0),
+            sharpness=self._safe_int(self.sharp_var, 0),
             dither=self.dither_var.get(),
-            rotation=int(self.rotation_var.get()),
+            rotation=self._safe_int(self.rotation_var, 0),
             artistic=self.artistic_var.get(),
             border=self.border_var.get(),
         )
@@ -1481,8 +1516,8 @@ class App:
 
         self._set_busy(True)
         self.print_btn.set_progress(0)
-        density = int(self.density_var.get())
-        feed = self.feed_var.get()
+        density = self._safe_int(self.density_var, DEFAULT_DENSITY)
+        feed = self._safe_int(self.feed_var, DEFAULT_FEED_AFTER)
         self.service.run_async(
             self._do_print_all_chunks(chunks_to_print, density, feed))
 
@@ -1542,7 +1577,9 @@ class App:
         self.print_btn.set_progress(0)
         lines, _ = prepare_text(SECRET_TEXT, font_size=20, align="center")
         self.service.run_async(self._do_print(
-            lines, int(self.density_var.get()), self.feed_var.get()))
+            lines,
+            self._safe_int(self.density_var, DEFAULT_DENSITY),
+            self._safe_int(self.feed_var, DEFAULT_FEED_AFTER),))
 
     def _on_close(self):
         if self.connected:

@@ -84,21 +84,18 @@ def build_segment_sequence(items: Sequence[Sequence[bytes]],
                            gap_lines: int = 0) -> list[Segment]:
     """Строит линейную последовательность сегментов документа.
 
-    Важно:
-    - copies реализуются на уровне layout
-    - gap вставляется между item'ами, в том числе между концом копии
-      и началом следующей копии
+    В текущей модели каждый item уже содержит все нужные пустые строки
+    после себя, поэтому layout отвечает только за порядок item'ов и copies.
+    gap_lines оставлен для совместимости, но не используется.
     """
     if not items:
         return []
 
     copies = max(1, int(copies))
-    gap_lines = max(0, int(gap_lines))
 
     sequence: list[Segment] = []
-    base_count = len(items)
 
-    for copy_idx in range(copies):
+    for _copy_idx in range(copies):
         for item_idx, item in enumerate(items):
             item_len = len(item)
             if item_len > 0:
@@ -111,19 +108,6 @@ def build_segment_sequence(items: Sequence[Sequence[bytes]],
                     )
                 )
 
-            is_last_global = (
-                copy_idx == copies - 1 and item_idx == base_count - 1
-            )
-            if not is_last_global and gap_lines > 0:
-                sequence.append(
-                    Segment(
-                        kind="gap",
-                        item_index=-1,
-                        start=0,
-                        length=gap_lines,
-                    )
-                )
-
     return sequence
 
 
@@ -132,9 +116,11 @@ def build_chunk_descriptors(sequence: Sequence[Segment],
                             ) -> list[ChunkDescriptor]:
     """Режет линейную последовательность сегментов на чанки.
 
-    В отличие от старого chunk_by_items:
-    - не материализует lines
-    - умеет разрезать слишком большой item на несколько чанков
+    Политика:
+    - по возможности не разрезаем сегменты между чанками
+    - если сегмент не помещается в непустой чанк, закрываем чанк и
+      переносим сегмент целиком в следующий
+    - если сегмент сам больше max_chunk_lines, режем его вынужденно
     """
     if not sequence:
         return [ChunkDescriptor(index=0, segments=tuple(), total_lines=0)]
@@ -146,6 +132,8 @@ def build_chunk_descriptors(sequence: Sequence[Segment],
 
     def flush():
         nonlocal current_segments, current_total, chunk_index
+        if not current_segments and chunks:
+            return
         chunks.append(
             ChunkDescriptor(
                 index=chunk_index,
@@ -158,16 +146,38 @@ def build_chunk_descriptors(sequence: Sequence[Segment],
         current_total = 0
 
     for seg in sequence:
+        # Если сегмент целиком помещается — добавляем его без разрезания
+        if seg.length <= 0:
+            continue
+
+        free = max_chunk_lines - current_total
+        if seg.length <= free:
+            current_segments.append(seg)
+            current_total += seg.length
+            continue
+
+        # Если текущий чанк не пуст — закрываем его и попробуем положить
+        # сегмент в следующий чанк целиком
+        if current_total > 0:
+            flush()
+
+        # После flush сегмент может поместиться целиком
+        if seg.length <= max_chunk_lines:
+            current_segments.append(seg)
+            current_total += seg.length
+            continue
+
+        # Сегмент сам больше лимита — режем вынужденно
         remaining = seg.length
         offset = seg.start
 
         while remaining > 0:
-            if current_total >= max_chunk_lines:
-                flush()
-
             free = max_chunk_lines - current_total
-            take = min(remaining, free)
+            if free <= 0:
+                flush()
+                free = max_chunk_lines
 
+            take = min(remaining, free)
             current_segments.append(
                 Segment(
                     kind=seg.kind,
