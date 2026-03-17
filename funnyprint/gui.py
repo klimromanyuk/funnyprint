@@ -1146,7 +1146,7 @@ class App:
             self.root.after_cancel(self._update_timer)
         self.chunk_index = 0
         self._update_chunk_nav(1, 0)
-        self._update_timer = self.root.after(200, self._update_preview)
+        self._update_timer = self.root.after(200, self._start_preview)
 
     def _on_strip_toggle(self):
         if self.strip_var.get():
@@ -1187,7 +1187,7 @@ class App:
             self.tabs.select(0)  # Image tab
             self.log(f"Картинка (drop): {os.path.basename(path)}")
 
-        self._update_preview()
+        self._schedule()
 
     def on_load_image(self):
         path = filedialog.askopenfilename(
@@ -1200,7 +1200,7 @@ class App:
         self.batch_paths = None
         self.file_lbl.config(text=os.path.basename(path), foreground="black")
         self.log(f"Загружено: {os.path.basename(path)}")
-        self._update_preview()
+        self._schedule()
     
     def on_load_pdf(self):
         path = filedialog.askopenfilename(
@@ -1220,7 +1220,7 @@ class App:
         else:
             self.pdf_range_var.set("all")
         self.log(f"PDF: {os.path.basename(path)}, {self.pdf_page_count} стр.")
-        self._update_preview()
+        self._schedule()
 
     def _hotkey_open(self):
         """Ctrl+O — открыть файл в зависимости от вкладки"""
@@ -1328,7 +1328,7 @@ class App:
         self.batch_paths = list(paths)
         self.chunk_index = 0
         self.log(f"Пакет: загружено {len(self.batch_paths)} картинок")
-        self._update_batch_preview()
+        self._schedule()
 
     def _update_batch_preview(self):
         if not self.batch_paths:
@@ -1341,9 +1341,7 @@ class App:
                 prepare_batch_images, prepare_batch_images_chunked,
                 add_feed_preview)
 
-            # Оцениваем размер
             if len(self.batch_paths) > 20:
-                # Большой пакет — чанками
                 lines, preview, total_chunks, total_files = \
                     prepare_batch_images_chunked(
                         self.batch_paths,
@@ -1353,13 +1351,12 @@ class App:
                 self.current_preview = preview
                 self._show_preview(preview)
                 self._update_chunk_nav(total_chunks, self.chunk_index)
-                self.will_print_lbl.config(
-                    text=f"Пакет: {total_files} картинок, "
-                         f"часть {self.chunk_index + 1}/{total_chunks}")
+                msg = (f"Пакет: {total_files} картинок, "
+                       f"часть {self.chunk_index + 1}/{total_chunks}")
+                self.root.after(0, lambda: self.will_print_lbl.config(text=msg))
                 if total_chunks > 1:
                     self.log(f"Большой пакет: {total_files} файлов, "
-                             f"{total_chunks} частей. "
-                             f"Каждая часть печатается отдельно.")
+                             f"{total_chunks} частей.")
             else:
                 lines, preview = prepare_batch_images(
                     self.batch_paths, feed_between=feed, **flt)
@@ -1368,8 +1365,8 @@ class App:
                 self.current_preview = preview
                 self._show_preview(preview)
                 self._update_chunk_nav(1, 0)
-                self.will_print_lbl.config(
-                    text=f"Пакет: {len(self.batch_paths)} картинок")
+                msg = f"Пакет: {len(self.batch_paths)} картинок"
+                self.root.after(0, lambda: self.will_print_lbl.config(text=msg))
         except Exception as e:
             self.log(f"Ошибка пакета: {e}")
 
