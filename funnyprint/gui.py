@@ -77,7 +77,6 @@ class App:
         self.chunk_index = 0
         self._cancel_all = False
         self.total_chunks = 1
-        self.all_lines_cache = None  # для маленьких данных
         self.current_lines = None
         self.current_preview = None
         self._preview_tk = None
@@ -785,19 +784,6 @@ class App:
         self._update_timer = None
         tab = self._get_tab()
         copies = self.copies_var.get()
-        heavy = (
-            (tab == 1 and self.pdf_path and self.pdf_page_count > 5)
-            or (tab == 0 and self.batch_paths
-                and len(self.batch_paths) > 10)
-            or copies > 5
-            or (tab == 4 and len(
-                self.qr_entry.get("1.0", tk.END).strip().split('\n')) > 5)
-            or (tab == 5 and len(
-                self.bc_entry.get("1.0", tk.END).strip()
-                .replace('\n', ',').split(',')) > 5))
-        if heavy:
-            self.loading_lbl.config(text="Загрузка...")
-            self.root.update_idletasks()
         self._last_tab = tab
 
         try:
@@ -1226,11 +1212,12 @@ class App:
         """Ctrl+O — открыть файл в зависимости от вкладки"""
         tab = self._get_tab()
         if tab == 0:
-            self.on_load_image()
+            if self.batch_paths:
+                self.on_batch()
+            else:
+                self.on_load_image()
         elif tab == 1:
             self.on_load_pdf()
-        elif tab == 0 and self.batch_paths:
-            self.on_batch()
 
     # ══════════════════════════════════
     #  BLE
