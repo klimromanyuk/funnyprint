@@ -988,11 +988,7 @@ class App:
             self._clear_preview("[введи rich text]")
             return None
         from funnyprint.richtext import render_rich_text, TextStyle
-        from funnyprint.imaging import (
-            apply_filters, apply_artistic_filter, dither_image,
-            pil_to_funny_lines, _trim_whitespace, _fit_to_printer,
-            _rotate_and_fit,
-        )
+        from funnyprint.imaging import finalize_image, pil_to_funny_lines
         fn = self.rt_font_combo.get() or self.font_names[0]
         fp = self.system_fonts.get(fn)
         img = render_rich_text(
@@ -1000,23 +996,8 @@ class App:
                           font_size=self.rt_font_size_var.get(),
                           align="left"))
         flt = self._get_filters()
-        img = apply_filters(img, brightness=flt["brightness"],
-                            contrast=flt["contrast"],
-                            sharpness=flt["sharpness"])
-        img = apply_artistic_filter(img, flt.get("artistic", "Нет"))
-        border = flt.get("border", "Нет")
-        if border != "Нет":
-            from funnyprint.borders import apply_border
-            img = apply_border(img, border)
-            img = _fit_to_printer(img)
-        if flt["rotation"]:
-            img = _rotate_and_fit(img, flt["rotation"])
-        else:
-            img = _trim_whitespace(img)
-            img = _fit_to_printer(img)
-        bw = dither_image(img.convert("L"), flt["dither"])
-        return self._apply_chunking(
-            pil_to_funny_lines(bw), bw, f"rich text [{fn}]")
+        lines, bw = finalize_image(img, **flt, trim=True)
+        return self._apply_chunking(lines, bw, f"rich text [{fn}]")
 
     def _preview_tab_text(self):
         text = self.text_widget.get("1.0", tk.END).strip()

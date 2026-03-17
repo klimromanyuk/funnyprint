@@ -92,6 +92,44 @@ def apply_filters(img, brightness=0, contrast=0, sharpness=0):
 
 
 # ════════════════════════════════════════
+#  Финализация изображения
+# ════════════════════════════════════════
+
+def finalize_image(img, brightness=0, contrast=0, sharpness=0,
+                   dither="Floyd-Steinberg", rotation=0,
+                   artistic="Нет", border="Нет", trim=True):
+    """Общий конвейер: фильтры → artistic → border → rotation → trim → fit → dither → lines.
+    Принимает RGB/RGBA, возвращает (funny_lines, bw_preview).
+    """
+    if img.mode in ("RGBA", "LA", "PA"):
+        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        bg.paste(img, mask=img.split()[-1])
+        img = bg.convert("RGB")
+    elif img.mode != "RGB":
+        img = img.convert("RGB")
+
+    img = apply_filters(img, brightness, contrast, sharpness)
+    img = apply_artistic_filter(img, artistic)
+
+    if border != "Нет":
+        from funnyprint.borders import apply_border
+        img = apply_border(img, border)
+        img = _fit_to_printer(img)
+
+    if rotation:
+        img = _rotate_and_fit(img, rotation)
+    elif trim:
+        img = _trim_whitespace(img)
+        img = _fit_to_printer(img)
+    else:
+        img = _fit_to_printer(img)
+
+    gray = img.convert("L")
+    bw = dither_image(gray, dither)
+    return pil_to_funny_lines(bw), bw
+
+
+# ════════════════════════════════════════
 #  Дизеринг
 # ════════════════════════════════════════
 
@@ -306,19 +344,9 @@ def prepare_image(path, brightness=0, contrast=0, sharpness=0,
     if new_h % 2:
         new_h += 1
     img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
-    img = apply_filters(img, brightness, contrast, sharpness)
-    img = apply_artistic_filter(img, artistic)
-    if border != "Нет":
-        from funnyprint.borders import apply_border
-        img = apply_border(img, border)
-        w, h = img.size
-        new_h = max(2, int(h * PRINTER_WIDTH / w))
-        if new_h % 2:
-            new_h += 1
-        img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
-    gray = img.convert("L")
-    bw = dither_image(gray, dither)
-    return pil_to_funny_lines(bw), bw
+    return finalize_image(img, brightness, contrast, sharpness,
+                          dither, rotation=0, artistic=artistic,
+                          border=border, trim=False)
 
 
 # ════════════════════════════════════════
@@ -502,31 +530,20 @@ def get_pdf_page_count(path):
 def prepare_pdf_page(path, page_num=0, brightness=0, contrast=0,
                      sharpness=0, dither="Floyd-Steinberg", rotation=0,
                      artistic="Нет", border="Нет"):
-    """Рендерит одну страницу PDF → (funny_lines, preview)"""
     import fitz
     doc = fitz.open(path)
     page = doc[page_num]
-
-    # Рендерим с высоким DPI для качества
     zoom = PRINTER_WIDTH / page.rect.width * 2
     mat = fitz.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat)
     img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     doc.close()
-
     if rotation:
         img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
-
     img = _fit_to_printer(img)
-    img = apply_filters(img, brightness, contrast, sharpness)
-    img = apply_artistic_filter(img, artistic)
-    if border != "Нет":
-        from funnyprint.borders import apply_border
-        img = apply_border(img, border)
-        img = _fit_to_printer(img)
-    gray = img.convert("L")
-    bw = dither_image(gray, dither)
-    return pil_to_funny_lines(bw), bw
+    return finalize_image(img, brightness, contrast, sharpness,
+                          dither, rotation=0, artistic=artistic,
+                          border=border, trim=False)
 
 
 # ════════════════════════════════════════
@@ -657,15 +674,9 @@ def prepare_qr(data, add_text=False, font_path=None, font_size=16,
     if rotation:
         img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
     img = _fit_to_printer(img)
-    img = apply_filters(img, brightness, contrast, sharpness)
-    img = apply_artistic_filter(img, artistic)
-    if border != "Нет":
-        from funnyprint.borders import apply_border
-        img = apply_border(img, border)
-        img = _fit_to_printer(img)
-    gray = img.convert("L")
-    bw = dither_image(gray, dither)
-    return pil_to_funny_lines(bw), bw
+    return finalize_image(img, brightness, contrast, sharpness,
+                          dither, rotation=0, artistic=artistic,
+                          border=border, trim=False)
 
 
 def prepare_barcode(data, barcode_type="code128", add_text=True,
@@ -677,15 +688,9 @@ def prepare_barcode(data, barcode_type="code128", add_text=True,
         img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
     img = _trim_whitespace(img)
     img = _fit_to_printer(img)
-    img = apply_filters(img, brightness, contrast, sharpness)
-    img = apply_artistic_filter(img, artistic)
-    if border != "Нет":
-        from funnyprint.borders import apply_border
-        img = apply_border(img, border)
-        img = _fit_to_printer(img)
-    gray = img.convert("L")
-    bw = dither_image(gray, dither)
-    return pil_to_funny_lines(bw), bw
+    return finalize_image(img, brightness, contrast, sharpness,
+                          dither, rotation=0, artistic=artistic,
+                          border=border, trim=False)
 
 
 def add_feed_preview(img_1bit, feed_px):

@@ -14,9 +14,7 @@ from funnyprint.imaging import (
     prepare_image, prepare_text, prepare_qr, prepare_barcode,
     prepare_pdf_page, prepare_batch_pdf, prepare_batch_images,
     prepare_batch_images_chunked, pil_to_funny_lines,
-    apply_filters, apply_artistic_filter, dither_image,
-    add_feed_preview, _lines_to_preview, _trim_whitespace,
-    _fit_to_printer, _rotate_and_fit,
+    finalize_image, add_feed_preview, _lines_to_preview,
 )
 from funnyprint.printer import find_and_connect, Printer
 from funnyprint.chunked import needs_chunking, MAX_CHUNK_LINES, estimate_chunks
@@ -104,28 +102,11 @@ class PrintService:
     def prepare_richtext(self, markup, font_path=None,
                          font_size=24, **filters):
         from funnyprint.richtext import render_rich_text, TextStyle
+        from funnyprint.imaging import finalize_image
         style = TextStyle(
             font_path=font_path, font_size=font_size, align="left")
         img = render_rich_text(markup, style)
-        img = apply_filters(img,
-                            brightness=filters.get("brightness", 0),
-                            contrast=filters.get("contrast", 0),
-                            sharpness=filters.get("sharpness", 0))
-        img = apply_artistic_filter(img, filters.get("artistic", "Нет"))
-        border = filters.get("border", "Нет")
-        if border != "Нет":
-            from funnyprint.borders import apply_border
-            img = apply_border(img, border)
-            img = _fit_to_printer(img)
-        rotation = filters.get("rotation", 0)
-        if rotation:
-            img = _rotate_and_fit(img, rotation)
-        else:
-            img = _trim_whitespace(img)
-            img = _fit_to_printer(img)
-        bw = dither_image(img.convert("L"),
-                          filters.get("dither", "Floyd-Steinberg"))
-        return pil_to_funny_lines(bw), bw
+        return finalize_image(img, **filters, trim=True)
 
     def prepare_pdf(self, path, pages, feed_between=50, **filters):
         if len(pages) == 1:
@@ -170,14 +151,6 @@ class PrintService:
         chunk = lines[s:min(s + MAX_CHUNK_LINES, len(lines))]
         preview = _lines_to_preview(chunk)
         return chunk, preview, total, idx
-
-    @staticmethod
-    def add_feed_preview(img, feed_px):
-        return add_feed_preview(img, feed_px)
-
-    @staticmethod
-    def lines_to_preview(lines):
-        return _lines_to_preview(lines)
 
     def stop(self):
         try:
