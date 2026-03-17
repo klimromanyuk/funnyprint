@@ -1113,12 +1113,12 @@ class App:
     def _prev_chunk(self):
         if self.chunk_index > 0:
             self.chunk_index -= 1
-            self._update_preview()
+            self._start_preview()
 
     def _next_chunk(self):
         if self.chunk_index < self.total_chunks - 1:
             self.chunk_index += 1
-            self._update_preview()
+            self._start_preview()
 
     def _update_chunk_nav(self, total, current):
         self.total_chunks = total
@@ -1486,8 +1486,13 @@ class App:
                 # Обновляем превью синхронно через событие
                 done_event = asyncio.Event()
                 def _do_update():
-                    self._update_preview()
-                    self.service._ble_loop.call_soon_threadsafe(done_event.set)
+                    def _bg():
+                        try:
+                            self._update_preview()
+                        finally:
+                            self.service._ble_loop.call_soon_threadsafe(
+                                done_event.set)
+                    threading.Thread(target=_bg, daemon=True).start()
                 self.root.after(0, _do_update)
                 await done_event.wait()
 
