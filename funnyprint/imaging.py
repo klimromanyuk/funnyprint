@@ -3,6 +3,7 @@
 import os
 import sys
 from itertools import islice
+from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
 from funnyprint import PRINTER_WIDTH
@@ -35,8 +36,7 @@ def get_system_fonts():
             for f in files:
                 if f.lower().endswith((".ttf", ".otf")):
                     fonts[os.path.splitext(f)[0]] = os.path.join(root, f)
-    fonts = dict(sorted(fonts.items(), key=lambda x: x[0].lower()))
-    return fonts if fonts else {"Default": None}
+    return dict(sorted(fonts.items(), key=lambda x: x[0].lower())) or {"Default": None}
 
 
 def load_font(font_path, size):
@@ -77,66 +77,58 @@ def pil_to_funny_lines(img_1bit):
     return result
 
 
-# ════════════════════════════════════════
-#  Фильтры
-# ════════════════════════════════════════
-
-def apply_filters(img, brightness=0, contrast=0, sharpness=0):
-    if brightness != 0:
-        img = ImageEnhance.Brightness(img).enhance((brightness + 100) / 100)
-    if contrast != 0:
-        img = ImageEnhance.Contrast(img).enhance((contrast + 100) / 100)
-    if sharpness != 0:
-        img = ImageEnhance.Sharpness(img).enhance((sharpness + 100) / 100)
+def _lines_to_preview(funny_lines):
+    """funny_lines → PIL Image mode '1' для превью"""
+    h = max(2, len(funny_lines) * 2)
+    if h % 2:
+        h += 1
+    img = Image.new("1", (PRINTER_WIDTH, h), color=1)
+    y = 0
+    for fl in funny_lines:
+        for row in range(2):
+            if y >= h:
+                break
+            row_data = fl[row * 48:(row + 1) * 48]
+            for byte_idx, byte_val in enumerate(row_data):
+                for bit in range(8):
+                    x = byte_idx * 8 + bit
+                    if x < PRINTER_WIDTH:
+                        if (byte_val >> (7 - bit)) & 1:
+                            img.putpixel((x, y), 0)
+            y += 1
     return img
 
 
 # ════════════════════════════════════════
-#  Финализация изображения
+#  Фильтры и дизеринг
 # ════════════════════════════════════════
 
-def finalize_image(img, brightness=0, contrast=0, sharpness=0,
-                   dither="Floyd-Steinberg", rotation=0,
-                   artistic="Нет", border="Нет", trim=True):
-    """Общий конвейер: фильтры → artistic → border → rotation → trim → fit → dither → lines.
-    Принимает RGB/RGBA, возвращает (funny_lines, bw_preview).
-    """
-    if img.mode in ("RGBA", "LA", "PA"):
-        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-        bg.paste(img, mask=img.split()[-1])
-        img = bg.convert("RGB")
-    elif img.mode != "RGB":
-        img = img.convert("RGB")
+def apply_filters(img, brightness=0, contrast=0, sharpness=0):
+    if brightness:
+        img = ImageEnhance.Brightness(img).enhance((brightness + 100) / 100)
+    if contrast:
+        img = ImageEnhance.Contrast(img).enhance((contrast + 100) / 100)
+    if sharpness:
+        img = ImageEnhance.Sharpness(img).enhance((sharpness + 100) / 100)
+    return img
 
-    img = apply_filters(img, brightness, contrast, sharpness)
-    img = apply_artistic_filter(img, artistic)
-
-    if border != "Нет":
-        from funnyprint.borders import apply_border
-        img = apply_border(img, border)
-        img = _fit_to_printer(img)
-
-    if rotation:
-        img = _rotate_and_fit(img, rotation)
-    elif trim:
-        img = _trim_whitespace(img)
-        img = _fit_to_printer(img)
-    else:
-        img = _fit_to_printer(img)
-
-    gray = img.convert("L")
-    bw = dither_image(gray, dither)
-    return pil_to_funny_lines(bw), bw
-
-
-# ════════════════════════════════════════
-#  Дизеринг
-# ════════════════════════════════════════
 
 DITHER_METHODS = [
     "Floyd-Steinberg", "Atkinson", "Stucki", "Burkes",
     "Sierra", "Sierra Lite", "Ordered 4x4", "Ordered 8x8", "Порог",
 ]
+
+_DIFFUSION_MATRICES = {
+    "Atkinson": ([(1,0,1),(2,0,1),(-1,1,1),(0,1,1),(1,1,1),(0,2,1)], 8),
+    "Stucki": ([(1,0,8),(2,0,4),(-2,1,2),(-1,1,4),(0,1,8),(1,1,4),
+                 (2,1,2),(-2,2,1),(-1,2,2),(0,2,4),(1,2,2),(2,2,1)], 42),
+    "Burkes": ([(1,0,8),(2,0,4),(-2,1,2),(-1,1,4),(0,1,8),
+                 (1,1,4),(2,1,2)], 32),
+    "Sierra": ([(1,0,5),(2,0,3),(-2,1,2),(-1,1,4),(0,1,5),(1,1,4),
+                 (2,1,2),(-1,2,2),(0,2,3),(1,2,2)], 32),
+    "Sierra Lite": ([(1,0,2),(-1,1,1),(0,1,1)], 4),
+}
+
 
 def _error_diffusion(img_gray, matrix, divisor):
     w, h = img_gray.size
@@ -176,7 +168,7 @@ def _ordered_dither(img_gray, size=4):
     op = out.load()
     for y in range(h):
         for x in range(w):
-            op[x, y] = 255 if px[x, y] > (bayer[y%sz][x%sz]/n)*255 else 0
+            op[x, y] = 255 if px[x, y] > (bayer[y % sz][x % sz] / n) * 255 else 0
     return out
 
 
@@ -189,28 +181,96 @@ def dither_image(img_gray, method="Floyd-Steinberg"):
         return img_gray.point(lambda x: 255 if x > 127 else 0, "1")
     if method.startswith("Ordered"):
         return _ordered_dither(img_gray, 8 if "8" in method else 4)
-    matrices = {
-        "Atkinson": ([(1,0,1),(2,0,1),(-1,1,1),(0,1,1),(1,1,1),(0,2,1)], 8),
-        "Stucki": ([(1,0,8),(2,0,4),(-2,1,2),(-1,1,4),(0,1,8),(1,1,4),
-                     (2,1,2),(-2,2,1),(-1,2,2),(0,2,4),(1,2,2),(2,2,1)], 42),
-        "Burkes": ([(1,0,8),(2,0,4),(-2,1,2),(-1,1,4),(0,1,8),
-                     (1,1,4),(2,1,2)], 32),
-        "Sierra": ([(1,0,5),(2,0,3),(-2,1,2),(-1,1,4),(0,1,5),(1,1,4),
-                     (2,1,2),(-1,2,2),(0,2,3),(1,2,2)], 32),
-        "Sierra Lite": ([(1,0,2),(-1,1,1),(0,1,1)], 4),
-    }
-    if method in matrices:
-        m, d = matrices[method]
+    if method in _DIFFUSION_MATRICES:
+        m, d = _DIFFUSION_MATRICES[method]
         return _error_diffusion(img_gray, m, d)
     return img_gray.convert("1")
 
 
 # ════════════════════════════════════════
-#  Утилиты
+#  Художественные фильтры
 # ════════════════════════════════════════
 
+ARTISTIC_FILTERS = [
+    "Нет", "LineArt (контуры)", "LineArt (тонкие)", "Инверсия",
+    "Высокий контраст", "Постеризация", "Тиснение", "Карандашный набросок",
+]
+
+
+def apply_artistic_filter(img, filter_name):
+    if not filter_name or filter_name == "Нет":
+        return img
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    if filter_name == "LineArt (контуры)":
+        return _lineart(img, thin=False)
+    if filter_name == "LineArt (тонкие)":
+        return _lineart(img, thin=True)
+    if filter_name == "Инверсия":
+        from PIL import ImageOps
+        return ImageOps.invert(img)
+    if filter_name == "Высокий контраст":
+        import numpy as np
+        gray = img.convert("L")
+        arr = np.array(gray)
+        return gray.point(lambda x: 255 if x > arr.mean() else 0).convert("RGB")
+    if filter_name == "Постеризация":
+        from PIL import ImageOps
+        return ImageOps.posterize(img, 2)
+    if filter_name == "Тиснение":
+        from PIL import ImageFilter
+        return img.convert("L").filter(ImageFilter.EMBOSS).convert("RGB")
+    if filter_name == "Карандашный набросок":
+        return _pencil_sketch(img)
+    return img
+
+
+def _lineart(img, thin=False):
+    from PIL import ImageFilter, ImageOps
+    gray = img.convert("L")
+    if thin:
+        edges = gray.filter(ImageFilter.Kernel(
+            size=(3, 3), kernel=[-1,-1,-1,-1,8,-1,-1,-1,-1],
+            scale=1, offset=0))
+        edges = ImageOps.invert(edges)
+        return edges.point(lambda x: 255 if x > 200 else 0).convert("RGB")
+    edges = gray.filter(ImageFilter.FIND_EDGES)
+    edges = ImageOps.invert(edges)
+    return ImageEnhance.Contrast(edges.convert("RGB")).enhance(2.0)
+
+
+def _pencil_sketch(img):
+    from PIL import ImageFilter, ImageOps
+    import numpy as np
+    gray = img.convert("L")
+    inv = ImageOps.invert(gray)
+    blur = inv.filter(ImageFilter.GaussianBlur(radius=12))
+    g = np.array(gray, dtype=np.float32)
+    b = np.array(blur, dtype=np.float32)
+    divisor = 256.0 - b
+    divisor[divisor == 0] = 1
+    result = np.clip(g * 256.0 / divisor, 0, 255).astype(np.uint8)
+    return Image.fromarray(result, mode="L").convert("RGB")
+
+
+# ════════════════════════════════════════
+#  Утилиты изображений
+# ════════════════════════════════════════
+
+def _to_rgb(img):
+    """Конвертирует любой режим в RGB, убирая прозрачность."""
+    if img.mode in ("RGBA", "LA", "PA"):
+        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
+        bg.paste(img, mask=img.split()[-1])
+        return bg.convert("RGB")
+    if img.mode != "RGB":
+        return img.convert("RGB")
+    return img
+
+
 def _trim_whitespace(img):
-    """Обрезает белые поля ТОЛЬКО сверху и снизу, бока не трогает"""
+    """Обрезает белые поля сверху и снизу."""
     gray = img.convert("L")
     mask = gray.point(lambda x: 0 if x > 245 else 255)
     bbox = mask.getbbox()
@@ -220,52 +280,50 @@ def _trim_whitespace(img):
     top = max(0, bbox[1] - pad)
     bottom = min(img.height, bbox[3] + pad)
     cropped = img.crop((0, top, img.width, bottom))
-    w, h = cropped.size
+    return _even_height(cropped)
+
+
+def _even_height(img):
+    """Делает высоту чётной."""
+    w, h = img.size
     if h % 2:
         canvas = Image.new("RGB", (w, h + 1), (255, 255, 255))
-        canvas.paste(cropped, (0, 0))
-        cropped = canvas
-    return cropped
+        canvas.paste(img, (0, 0))
+        return canvas
+    return img
 
 
 def _fit_to_printer(img):
-    """Подгоняет ширину к PRINTER_WIDTH, высота чётная.
-    Если ширина уже равна PRINTER_WIDTH — только чётность высоты.
-    Если меньше — центрируем на белом фоне (не растягиваем!).
-    Если больше — масштабируем вниз.
-    """
+    """Подгоняет ширину к PRINTER_WIDTH, высота чётная."""
     w, h = img.size
-
     if w > PRINTER_WIDTH:
         new_h = max(2, int(h * PRINTER_WIDTH / w))
         img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
-        w, h = img.size
     elif w < PRINTER_WIDTH:
         canvas = Image.new("RGB", (PRINTER_WIDTH, h), (255, 255, 255))
         canvas.paste(img, ((PRINTER_WIDTH - w) // 2, 0))
         img = canvas
-        w = PRINTER_WIDTH
+    return _even_height(img)
 
-    if h % 2:
-        canvas = Image.new("RGB", (w, h + 1), (255, 255, 255))
-        canvas.paste(img, (0, 0))
-        img = canvas
 
-    return img
+def _scale_to_width(img):
+    """Масштабирует к PRINTER_WIDTH пропорционально, высота чётная."""
+    w, h = img.size
+    new_h = max(2, int(h * PRINTER_WIDTH / w))
+    if new_h % 2:
+        new_h += 1
+    return img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
 
 
 def _rotate_and_fit(img, angle):
-    """Поворот для текста — не обрезает бока"""
-    if angle == 0:
+    if not angle:
         return img
     img = img.rotate(-angle, expand=True, fillcolor=(255, 255, 255))
-    # Только верх/низ обрезаем
     img = _trim_whitespace(img)
     return _fit_to_printer(img)
 
 
 def _apply_italic_line(line_img, line_h):
-    """Наклоняет одну строку текста"""
     shear = 0.2
     w, h = line_img.size
     extra = int(h * shear) + 8
@@ -275,12 +333,110 @@ def _apply_italic_line(line_img, line_h):
         wide.size, Image.AFFINE,
         (1, -shear, shear * h * 0.5, 0, 1, 0),
         resample=Image.BILINEAR, fillcolor=(255, 255, 255))
-    # Обрезаем пустоту по бокам
     mask = wide.convert("L").point(lambda x: 0 if x > 245 else 255)
     bb = mask.getbbox()
     if bb:
         wide = wide.crop((max(0, bb[0] - 2), 0, min(wide.width, bb[2] + 2), h))
     return wide
+
+
+def add_feed_preview(img_1bit, feed_px):
+    """Добавляет белое пространство внизу для визуализации промотки."""
+    if feed_px <= 0:
+        return img_1bit
+    w, h = img_1bit.size
+    new_h = h + feed_px
+    if new_h % 2:
+        new_h += 1
+    result = Image.new("1", (w, new_h), color=1)
+    result.paste(img_1bit, (0, 0))
+    return result
+
+
+# ════════════════════════════════════════
+#  Финализация (общий конвейер)
+# ════════════════════════════════════════
+
+def finalize_image(img, brightness=0, contrast=0, sharpness=0,
+                   dither="Floyd-Steinberg", rotation=0,
+                   artistic="Нет", border="Нет", trim=True):
+    """Фильтры → artistic → border → rotation → trim → fit → dither → lines.
+    Возвращает (funny_lines, bw_preview).
+    """
+    img = _to_rgb(img)
+    img = apply_filters(img, brightness, contrast, sharpness)
+    img = apply_artistic_filter(img, artistic)
+
+    if border != "Нет":
+        from funnyprint.borders import apply_border
+        img = apply_border(img, border)
+        img = _fit_to_printer(img)
+
+    if rotation:
+        img = _rotate_and_fit(img, rotation)
+    elif trim:
+        img = _trim_whitespace(img)
+        img = _fit_to_printer(img)
+    else:
+        img = _fit_to_printer(img)
+
+    bw = dither_image(img.convert("L"), dither)
+    return pil_to_funny_lines(bw), bw
+
+
+def _open_and_scale(path, rotation=0):
+    """Открывает картинку, конвертирует в RGB, поворачивает, масштабирует."""
+    img = _to_rgb(Image.open(path))
+    if rotation:
+        img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
+    return _scale_to_width(img)
+
+
+def _finalize_to_bw(img, brightness=0, contrast=0, sharpness=0,
+                    dither="Floyd-Steinberg", artistic="Нет", border="Нет"):
+    """Финализация без rotation/trim (уже применены). Возвращает bw Image."""
+    img = apply_filters(img, brightness, contrast, sharpness)
+    img = apply_artistic_filter(img, artistic)
+    if border != "Нет":
+        from funnyprint.borders import apply_border
+        img = apply_border(img, border)
+        img = _fit_to_printer(img)
+    return dither_image(img.convert("L"), dither)
+
+
+# ════════════════════════════════════════
+#  Склейка нескольких bw-картинок
+# ════════════════════════════════════════
+
+def _combine_bw(images_bw, feed_between=0):
+    """Склеивает список bw-картинок вертикально с промежутками."""
+    total_h = sum(im.height for im in images_bw)
+    if feed_between > 0 and len(images_bw) > 1:
+        total_h += feed_between * (len(images_bw) - 1)
+    if total_h % 2:
+        total_h += 1
+    total_h = max(2, total_h)
+
+    combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
+    y = 0
+    for i, bw in enumerate(images_bw):
+        combined.paste(bw, (0, y))
+        y += bw.height
+        if i < len(images_bw) - 1 and feed_between > 0:
+            y += feed_between
+    return combined
+
+
+def _bw_list_to_lines(images_bw, feed_between=0):
+    """bw-картинки → funny_lines с промежутками."""
+    all_lines = []
+    blank = bytes(96)
+    gap = feed_between // 2 if feed_between > 0 else 0
+    for i, bw in enumerate(images_bw):
+        all_lines.extend(pil_to_funny_lines(bw))
+        if i < len(images_bw) - 1 and gap > 0:
+            all_lines.extend(blank for _ in range(gap))
+    return all_lines
 
 
 # ════════════════════════════════════════
@@ -296,8 +452,7 @@ def _wrap_text(text, font, max_width, draw, stroke=0):
         current = ""
         for word in raw_line.split(" "):
             test = (current + " " + word).strip()
-            bbox = draw.textbbox((0, 0), test, font=font,
-                                 stroke_width=stroke)
+            bbox = draw.textbbox((0, 0), test, font=font, stroke_width=stroke)
             if bbox[2] <= max_width:
                 current = test
             else:
@@ -323,201 +478,121 @@ def _wrap_text(text, font, max_width, draw, stroke=0):
     return wrapped
 
 
+def _render_text_line(draw, img, line, font, stroke, italic, line_h,
+                      x, y, align, width, pad):
+    """Рендерит одну строку текста на img."""
+    bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke)
+    tw = bbox[2] - bbox[0]
+
+    if italic and line.strip():
+        line_img = Image.new("RGB", (tw + 8, line_h), (255, 255, 255))
+        ld = ImageDraw.Draw(line_img)
+        ld.text((4, 0), line, font=font, fill=(0, 0, 0),
+                stroke_width=stroke, stroke_fill=(0, 0, 0))
+        line_img = _apply_italic_line(line_img, line_h)
+        lw = line_img.width
+        if align == "center":
+            x = (width - lw) // 2
+        elif align == "right":
+            x = width - lw - pad
+        px = max(0, x)
+        cl, cr = max(0, -x), min(lw, width - px)
+        if cr > cl:
+            img.paste(line_img.crop((cl, 0, cr, line_h)), (px, y))
+    else:
+        if align == "center":
+            x = (width - tw) // 2
+        elif align == "right":
+            x = width - tw - pad
+        draw.text((x, y), line, font=font, fill=(0, 0, 0),
+                  stroke_width=stroke, stroke_fill=(0, 0, 0))
+
+
 # ════════════════════════════════════════
-#  Подготовка картинки
+#  Подготовка данных для печати
 # ════════════════════════════════════════
 
-def prepare_image(path, brightness=0, contrast=0, sharpness=0,
-                  dither="Floyd-Steinberg", rotation=0,
-                  artistic="Нет", border="Нет"):
-    img = Image.open(path)
-    if img.mode in ("RGBA", "LA", "PA"):
-        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-        bg.paste(img, mask=img.split()[-1])
-        img = bg.convert("RGB")
-    elif img.mode != "RGB":
-        img = img.convert("RGB")
-    if rotation:
-        img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
-    w, h = img.size
-    new_h = max(2, int(h * PRINTER_WIDTH / w))
-    if new_h % 2:
-        new_h += 1
-    img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
-    return finalize_image(img, brightness, contrast, sharpness,
-                          dither, rotation=0, artistic=artistic,
-                          border=border, trim=False)
+def prepare_image(path, **filters):
+    img = _open_and_scale(path, filters.get("rotation", 0))
+    return finalize_image(img, **{**filters, "rotation": 0}, trim=False)
 
-
-# ════════════════════════════════════════
-#  Подготовка текста
-# ════════════════════════════════════════
 
 def prepare_text(text, font_path=None, font_size=24,
-                 brightness=0, contrast=0, sharpness=0,
-                 dither="Floyd-Steinberg", rotation=0,
                  bold=False, italic=False, align="left",
-                 strip_mode=False, artistic="Нет",
-                 border="Нет"):
+                 strip_mode=False, **filters):
     font = load_font(font_path, font_size)
     stroke = 2 if bold else 0
     line_h = font_size + 6
     pad = 8
-    dummy_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    dummy = ImageDraw.Draw(Image.new("RGB", (1, 1)))
 
     if strip_mode:
-        return _prepare_strip(
-            text, font, font_size, line_h, pad, stroke, italic,
-            align, brightness, contrast, sharpness, dither,
-            rotation, dummy_draw)
+        img = _render_strip(text, font, font_size, line_h, pad, stroke,
+                            italic, align, dummy)
+    else:
+        img = _render_text(text, font, line_h, pad, stroke, italic,
+                           align, dummy)
 
-    # ── Обычный режим ──
+    return finalize_image(img, **filters, trim=True)
+
+
+def _render_text(text, font, line_h, pad, stroke, italic, align, dummy):
     max_w = PRINTER_WIDTH - pad * 2
-    wrapped = _wrap_text(text, font, max_w, dummy_draw, stroke)
-
-    img_h = line_h * len(wrapped) + pad * 2
-    if img_h < 32:
-        img_h = 32
+    wrapped = _wrap_text(text, font, max_w, dummy, stroke)
+    img_h = max(32, line_h * len(wrapped) + pad * 2)
     if img_h % 2:
         img_h += 1
-
     img = Image.new("RGB", (PRINTER_WIDTH, img_h), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-
     y = pad
     for line in wrapped:
-        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke)
-        tw = bbox[2] - bbox[0]
-
-        if italic and line.strip():
-            # Рендерим строку отдельно
-            line_img = Image.new("RGB", (tw + 8, line_h), (255, 255, 255))
-            ld = ImageDraw.Draw(line_img)
-            ld.text((4, 0), line, font=font, fill=(0, 0, 0),
-                    stroke_width=stroke, stroke_fill=(0, 0, 0))
-            line_img = _apply_italic_line(line_img, line_h)
-            lw = line_img.width
-
-            if align == "center":
-                x = (PRINTER_WIDTH - lw) // 2
-            elif align == "right":
-                x = PRINTER_WIDTH - lw - pad
-            else:
-                x = pad
-
-            # Вставляем с обрезкой по границам
-            px = max(0, x)
-            cl = max(0, -x)
-            cr = min(lw, PRINTER_WIDTH - px)
-            if cr > cl:
-                img.paste(line_img.crop((cl, 0, cr, line_h)), (px, y))
-        else:
-            if align == "center":
-                x = (PRINTER_WIDTH - tw) // 2
-            elif align == "right":
-                x = PRINTER_WIDTH - tw - pad
-            else:
-                x = pad
-            draw.text((x, y), line, font=font, fill=(0, 0, 0),
-                      stroke_width=stroke, stroke_fill=(0, 0, 0))
+        _render_text_line(draw, img, line, font, stroke, italic,
+                          line_h, pad, y, align, PRINTER_WIDTH, pad)
         y += line_h
-
-    img = apply_filters(img, brightness, contrast, sharpness)
-    img = apply_artistic_filter(img, artistic)
-
-    # Обрезаем пустоту, вписываем в PRINTER_WIDTH
-    img = _trim_whitespace(img)
-    img = _fit_to_printer(img)
-
-    if rotation:
-        img = _rotate_and_fit(img, rotation)
-
-    if border != "Нет":
-        from funnyprint.borders import apply_border
-        img = apply_border(img, border)
-        img = _fit_to_printer(img)
-
-    gray = img.convert("L")
-    bw = dither_image(gray, dither)
-    return pil_to_funny_lines(bw), bw
+    return img
 
 
-def _prepare_strip(text, font, font_size, line_h, pad, stroke,
-                   italic, align, brightness, contrast, sharpness,
-                   dither, rotation, dummy_draw, artistic="Нет"):
+def _render_strip(text, font, font_size, line_h, pad, stroke,
+                  italic, align, dummy):
     max_lines = PRINTER_WIDTH // line_h
     lines = text.replace("\\n", "\n").split("\n")
-
     max_w = 0
     for line in lines:
-        bbox = dummy_draw.textbbox((0, 0), line, font=font,
-                                   stroke_width=stroke)
+        bbox = dummy.textbbox((0, 0), line, font=font, stroke_width=stroke)
         max_w = max(max_w, bbox[2] - bbox[0])
-
     img_w = max(max_w + pad * 2, 32)
     used = min(len(lines), max_lines)
     img_h = line_h * used + pad * 2
-
     img = Image.new("RGB", (img_w, img_h), (255, 255, 255))
     draw = ImageDraw.Draw(img)
-
     y = pad
     for line in lines[:max_lines]:
-        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=stroke)
-        tw = bbox[2] - bbox[0]
-
-        if italic and line.strip():
-            line_img = Image.new("RGB", (tw + 8, line_h), (255, 255, 255))
-            ld = ImageDraw.Draw(line_img)
-            ld.text((4, 0), line, font=font, fill=(0, 0, 0),
-                    stroke_width=stroke, stroke_fill=(0, 0, 0))
-            line_img = _apply_italic_line(line_img, line_h)
-            lw = line_img.width
-
-            if align == "center":
-                x = (img_w - lw) // 2
-            elif align == "right":
-                x = img_w - lw - pad
-            else:
-                x = pad
-            px = max(0, x)
-            cl = max(0, -x)
-            cr = min(lw, img_w - px)
-            if cr > cl:
-                img.paste(line_img.crop((cl, 0, cr, line_h)), (px, y))
-        else:
-            if align == "center":
-                x = (img_w - tw) // 2
-            elif align == "right":
-                x = img_w - tw - pad
-            else:
-                x = pad
-            draw.text((x, y), line, font=font, fill=(0, 0, 0),
-                      stroke_width=stroke, stroke_fill=(0, 0, 0))
+        _render_text_line(draw, img, line, font, stroke, italic,
+                          line_h, pad, y, align, img_w, pad)
         y += line_h
-
     img = _trim_whitespace(img)
     img = img.rotate(-90, expand=True, fillcolor=(255, 255, 255))
-    img = _trim_whitespace(img)
-    img = _fit_to_printer(img)
-
-    img = apply_filters(img, brightness, contrast, sharpness)
-    img = apply_artistic_filter(img, artistic)
-    if rotation:
-        img = _rotate_and_fit(img, rotation)
-
-    gray = img.convert("L")
-    bw = dither_image(gray, dither)
-    return pil_to_funny_lines(bw), bw
+    return img
 
 
 def get_strip_info(font_size):
     return PRINTER_WIDTH // (font_size + 6)
 
 
-# ════════════════════════════════════════
-#  PDF
-# ════════════════════════════════════════
+def prepare_pdf_page(path, page_num=0, **filters):
+    import fitz
+    doc = fitz.open(path)
+    page = doc[page_num]
+    zoom = PRINTER_WIDTH / page.rect.width * 2
+    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    doc.close()
+    rotation = filters.get("rotation", 0)
+    if rotation:
+        img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
+    img = _fit_to_printer(img)
+    return finalize_image(img, **{**filters, "rotation": 0}, trim=False)
+
 
 def get_pdf_page_count(path):
     import fitz
@@ -527,137 +602,9 @@ def get_pdf_page_count(path):
     return count
 
 
-def prepare_pdf_page(path, page_num=0, brightness=0, contrast=0,
-                     sharpness=0, dither="Floyd-Steinberg", rotation=0,
-                     artistic="Нет", border="Нет"):
-    import fitz
-    doc = fitz.open(path)
-    page = doc[page_num]
-    zoom = PRINTER_WIDTH / page.rect.width * 2
-    mat = fitz.Matrix(zoom, zoom)
-    pix = page.get_pixmap(matrix=mat)
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    doc.close()
-    if rotation:
-        img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
-    img = _fit_to_printer(img)
-    return finalize_image(img, brightness, contrast, sharpness,
-                          dither, rotation=0, artistic=artistic,
-                          border=border, trim=False)
-
-
 # ════════════════════════════════════════
 #  QR / Barcode
 # ════════════════════════════════════════
-
-def generate_qr(data, size=None, add_text=False, font_path=None,
-                font_size=16):
-    import qrcode
-    qr = qrcode.QRCode(
-        version=None,
-        error_correction=qrcode.constants.ERROR_CORRECT_M,
-        box_size=10, border=2)
-    qr.add_data(data)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-
-    # QR всегда по ширине принтера
-    qr_size = PRINTER_WIDTH - 16
-    img = img.resize((qr_size, qr_size), Image.NEAREST)
-
-    if add_text and data:
-        font = load_font(font_path, font_size)
-        max_tw = PRINTER_WIDTH - 16
-        dummy_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-
-        # Переносим длинный текст
-        wrapped = []
-        current = ""
-        for ch in data:
-            test = current + ch
-            bbox = dummy_draw.textbbox((0, 0), test, font=font)
-            if bbox[2] > max_tw and current:
-                wrapped.append(current)
-                current = ch
-            else:
-                current = test
-        if current:
-            wrapped.append(current)
-
-        line_h = font_size + 4
-        text_h = line_h * len(wrapped) + 8
-        combined = Image.new("RGB",
-            (PRINTER_WIDTH, qr_size + text_h + 8),
-            (255, 255, 255))
-        combined.paste(img, ((PRINTER_WIDTH - qr_size) // 2, 4))
-        d = ImageDraw.Draw(combined)
-        y = qr_size + 8
-        for line in wrapped:
-            bbox = d.textbbox((0, 0), line, font=font)
-            tw = bbox[2] - bbox[0]
-            d.text(((PRINTER_WIDTH - tw) // 2, y),
-                   line, font=font, fill=(0, 0, 0))
-            y += line_h
-        img = combined
-    else:
-        # Центрируем QR на белом фоне
-        combined = Image.new("RGB", (PRINTER_WIDTH, qr_size + 8),
-                             (255, 255, 255))
-        combined.paste(img, ((PRINTER_WIDTH - qr_size) // 2, 4))
-        img = combined
-
-    return img
-
-def generate_barcode(data, barcode_type="code128", add_text=True):
-    import barcode as bc
-    from barcode.writer import ImageWriter
-
-    try:
-        code_class = bc.get_barcode_class(barcode_type)
-    except bc.errors.BarcodeNotFoundError:
-        code_class = bc.get_barcode_class("code128")
-
-    # Валидация: убираем невалидные символы
-    valid = ""
-    for ch in data:
-        if ord(ch) < 128:
-            valid += ch
-    if not valid:
-        raise ValueError("Штрих-код поддерживает только латиницу и цифры")
-
-    writer = ImageWriter()
-    code = code_class(valid, writer=writer)
-
-    from io import BytesIO
-    buf = BytesIO()
-    code.write(buf, options={
-        "module_width": 0.4,
-        "module_height": 25,
-        "font_size": 0,
-        "text_distance": 0,
-        "quiet_zone": 2,
-        "write_text": False,
-    })
-    buf.seek(0)
-    img = Image.open(buf).convert("RGB")
-
-    if add_text:
-        font = load_font(None, 32)
-        draw_dummy = ImageDraw.Draw(Image.new("RGB", (1, 1)))
-        bbox = draw_dummy.textbbox((0, 0), valid, font=font)
-        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
-
-        combined = Image.new("RGB",
-            (max(img.width, tw + 16), img.height + th + 12),
-            (255, 255, 255))
-        combined.paste(img, (0, 0))
-        d = ImageDraw.Draw(combined)
-        d.text(((combined.width - tw) // 2, img.height + 6),
-               valid, font=font, fill=(0, 0, 0))
-        img = combined
-
-    return img
-
 
 BARCODE_TYPES = [
     "code128", "code39", "ean13", "ean8", "upca",
@@ -665,87 +612,122 @@ BARCODE_TYPES = [
 ]
 
 
-def prepare_qr(data, add_text=False, font_path=None, font_size=16,
-               brightness=0, contrast=0, sharpness=0,
-               dither="Floyd-Steinberg", rotation=0, artistic="Нет",
-               border="Нет"):
+def generate_qr(data, add_text=False, font_path=None, font_size=16, **_):
+    import qrcode
+    qr = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_M,
+                        box_size=10, border=2)
+    qr.add_data(data)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
+    qr_size = PRINTER_WIDTH - 16
+    img = img.resize((qr_size, qr_size), Image.NEAREST)
+
+    if add_text and data:
+        font = load_font(font_path, font_size)
+        max_tw = PRINTER_WIDTH - 16
+        dummy = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        wrapped, current = [], ""
+        for ch in data:
+            test = current + ch
+            if dummy.textbbox((0, 0), test, font=font)[2] > max_tw and current:
+                wrapped.append(current)
+                current = ch
+            else:
+                current = test
+        if current:
+            wrapped.append(current)
+        lh = font_size + 4
+        text_h = lh * len(wrapped) + 8
+        combined = Image.new("RGB", (PRINTER_WIDTH, qr_size + text_h + 8),
+                             (255, 255, 255))
+        combined.paste(img, ((PRINTER_WIDTH - qr_size) // 2, 4))
+        d = ImageDraw.Draw(combined)
+        y = qr_size + 8
+        for line in wrapped:
+            tw = d.textbbox((0, 0), line, font=font)[2]
+            d.text(((PRINTER_WIDTH - tw) // 2, y), line, font=font,
+                   fill=(0, 0, 0))
+            y += lh
+        return combined
+
+    combined = Image.new("RGB", (PRINTER_WIDTH, qr_size + 8), (255, 255, 255))
+    combined.paste(img, ((PRINTER_WIDTH - qr_size) // 2, 4))
+    return combined
+
+
+def generate_barcode(data, barcode_type="code128", add_text=True):
+    import barcode as bc
+    from barcode.writer import ImageWriter
+    try:
+        code_class = bc.get_barcode_class(barcode_type)
+    except bc.errors.BarcodeNotFoundError:
+        code_class = bc.get_barcode_class("code128")
+    valid = "".join(ch for ch in data if ord(ch) < 128)
+    if not valid:
+        raise ValueError("Штрих-код поддерживает только латиницу и цифры")
+    buf = BytesIO()
+    code_class(valid, writer=ImageWriter()).write(buf, options={
+        "module_width": 0.4, "module_height": 25, "font_size": 0,
+        "text_distance": 0, "quiet_zone": 2, "write_text": False,
+    })
+    buf.seek(0)
+    img = Image.open(buf).convert("RGB")
+    if add_text:
+        font = load_font(None, 32)
+        bbox = ImageDraw.Draw(Image.new("RGB", (1, 1))).textbbox(
+            (0, 0), valid, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        combined = Image.new("RGB",
+            (max(img.width, tw + 16), img.height + th + 12), (255, 255, 255))
+        combined.paste(img, (0, 0))
+        ImageDraw.Draw(combined).text(
+            ((combined.width - tw) // 2, img.height + 6),
+            valid, font=font, fill=(0, 0, 0))
+        img = combined
+    return img
+
+
+def prepare_qr(data, add_text=False, font_path=None, font_size=16, **filters):
     img = generate_qr(data, add_text=add_text,
                       font_path=font_path, font_size=font_size)
+    rotation = filters.get("rotation", 0)
     if rotation:
         img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
     img = _fit_to_printer(img)
-    return finalize_image(img, brightness, contrast, sharpness,
-                          dither, rotation=0, artistic=artistic,
-                          border=border, trim=False)
+    return finalize_image(img, **{**filters, "rotation": 0}, trim=False)
 
 
-def prepare_barcode(data, barcode_type="code128", add_text=True,
-                    brightness=0, contrast=0, sharpness=0,
-                    dither="Floyd-Steinberg", rotation=0,
-                    artistic="Нет", border="Нет"):
+def prepare_barcode(data, barcode_type="code128", add_text=True, **filters):
     img = generate_barcode(data, barcode_type, add_text)
+    rotation = filters.get("rotation", 0)
     if rotation:
         img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
     img = _trim_whitespace(img)
     img = _fit_to_printer(img)
-    return finalize_image(img, brightness, contrast, sharpness,
-                          dither, rotation=0, artistic=artistic,
-                          border=border, trim=False)
+    return finalize_image(img, **{**filters, "rotation": 0}, trim=False)
 
 
-def add_feed_preview(img_1bit, feed_px):
-    """Добавляет белое пространство внизу для визуализации промотки"""
-    if feed_px <= 0:
-        return img_1bit
-    w, h = img_1bit.size
-    new_h = h + feed_px
-    if new_h % 2:
-        new_h += 1
-    result = Image.new("1", (w, new_h), color=1)  # белый
-    result.paste(img_1bit, (0, 0))
-    return result
+# ════════════════════════════════════════
+#  Batch-обработка
+# ════════════════════════════════════════
 
-
-def prepare_batch_images(paths, brightness=0, contrast=0, sharpness=0,
-                         dither="Floyd-Steinberg", rotation=0,
-                         feed_between=50, artistic="Нет", border="Нет"):
-    from funnyprint.borders import apply_border
+def prepare_batch_images(paths, feed_between=50, **filters):
+    rotation = filters.get("rotation", 0)
     images_bw = []
     for path in paths:
-        img = Image.open(path)
-        if img.mode in ("RGBA", "LA", "PA"):
-            bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-            bg.paste(img, mask=img.split()[-1])
-            img = bg.convert("RGB")
-        elif img.mode != "RGB":
-            img = img.convert("RGB")
-        if rotation:
-            img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
-        w, h = img.size
-        new_h = max(2, int(h * PRINTER_WIDTH / w))
-        if new_h % 2:
-            new_h += 1
-        img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
-        img = apply_filters(img, brightness, contrast, sharpness)
-        img = apply_artistic_filter(img, artistic)
-        if border != "Нет":
-            img = apply_border(img, border)
-            img = _fit_to_printer(img)
-        gray = img.convert("L")
-        bw = dither_image(gray, dither)
+        img = _open_and_scale(path, rotation)
+        bw = _finalize_to_bw(img, **{k: v for k, v in filters.items()
+                                     if k != "rotation"})
         images_bw.append(bw)
 
-    # Ограничиваем превью по высоте для производительности
     MAX_PREVIEW_H = 20000
     total_h = sum(im.height for im in images_bw)
-    if feed_between > 0:
+    if feed_between > 0 and len(images_bw) > 1:
         total_h += feed_between * (len(images_bw) - 1)
-    if total_h % 2:
-        total_h += 1
+    preview_h = min(total_h if total_h % 2 == 0 else total_h + 1,
+                    MAX_PREVIEW_H)
 
-    # Для превью обрезаем, для печати — всё
-    preview_h = min(total_h, MAX_PREVIEW_H)
-    combined = Image.new("1", (PRINTER_WIDTH, preview_h), color=1)
+    combined = Image.new("1", (PRINTER_WIDTH, max(2, preview_h)), color=1)
     y = 0
     for i, bw in enumerate(images_bw):
         if y >= preview_h:
@@ -756,312 +738,80 @@ def prepare_batch_images(paths, brightness=0, contrast=0, sharpness=0,
         if i < len(images_bw) - 1 and feed_between > 0:
             y += feed_between
 
-    # funny_lines из ВСЕХ картинок (не обрезанных)
-    all_lines = []
-    for i, bw in enumerate(images_bw):
-        all_lines.extend(pil_to_funny_lines(bw))
-        if i < len(images_bw) - 1 and feed_between > 0:
-            blank = bytes(96)
-            for _ in range(feed_between // 2):
-                all_lines.append(blank)
-
-    return all_lines, combined
+    return _bw_list_to_lines(images_bw, feed_between), combined
 
 
-def prepare_batch_pdf(path, pages, brightness=0, contrast=0, sharpness=0,
-                      dither="Floyd-Steinberg", rotation=0, feed_between=50,
-                      artistic="Нет", border="Нет"):
+def prepare_batch_pdf(path, pages, feed_between=50, **filters):
     import fitz
-    from funnyprint.borders import apply_border
+    rotation = filters.get("rotation", 0)
+    flt = {k: v for k, v in filters.items() if k != "rotation"}
     doc = fitz.open(path)
     images_bw = []
     for pg in pages:
         page = doc[pg]
         zoom = PRINTER_WIDTH / page.rect.width * 2
-        mat = fitz.Matrix(zoom, zoom)
-        pix = page.get_pixmap(matrix=mat)
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
         if rotation:
-            img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
+            img = img.rotate(-rotation, expand=True,
+                             fillcolor=(255, 255, 255))
         img = _fit_to_printer(img)
-        img = apply_filters(img, brightness, contrast, sharpness)
-        img = apply_artistic_filter(img, artistic)
-        if border != "Нет":
-            img = apply_border(img, border)
-            img = _fit_to_printer(img)
-        gray = img.convert("L")
-        bw = dither_image(gray, dither)
-        images_bw.append(bw)
+        images_bw.append(_finalize_to_bw(img, **flt))
     doc.close()
 
-    total_h = sum(im.height for im in images_bw)
-    if feed_between > 0:
-        total_h += feed_between * (len(images_bw) - 1)
-    if total_h % 2:
-        total_h += 1
-    combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
-    y = 0
-    for i, bw in enumerate(images_bw):
-        combined.paste(bw, (0, y))
-        y += bw.height
-        if i < len(images_bw) - 1 and feed_between > 0:
-            y += feed_between
+    combined = _combine_bw(images_bw, feed_between)
     return pil_to_funny_lines(combined), combined
-
-# ════════════════════════════════════════
-#  Художественные фильтры
-# ════════════════════════════════════════
-
-ARTISTIC_FILTERS = [
-    "Нет",
-    "LineArt (контуры)",
-    "LineArt (тонкие)",
-    "Инверсия",
-    "Высокий контраст",
-    "Постеризация",
-    "Тиснение",
-    "Карандашный набросок",
-]
-
-
-def apply_artistic_filter(img, filter_name):
-    """Применяет художественный фильтр к RGB изображению"""
-    if filter_name == "Нет" or not filter_name:
-        return img
-
-    if img.mode != "RGB":
-        img = img.convert("RGB")
-
-    if filter_name == "LineArt (контуры)":
-        return _lineart(img, thin=False)
-
-    elif filter_name == "LineArt (тонкие)":
-        return _lineart(img, thin=True)
-
-    elif filter_name == "Инверсия":
-        from PIL import ImageOps
-        return ImageOps.invert(img)
-
-    elif filter_name == "Высокий контраст":
-        gray = img.convert("L")
-        # Порог по среднему
-        import numpy as np
-        arr = np.array(gray)
-        threshold = arr.mean()
-        bw = gray.point(lambda x: 255 if x > threshold else 0)
-        return bw.convert("RGB")
-
-    elif filter_name == "Постеризация":
-        from PIL import ImageOps
-        return ImageOps.posterize(img, 2)
-
-    elif filter_name == "Тиснение":
-        from PIL import ImageFilter
-        gray = img.convert("L")
-        emboss = gray.filter(ImageFilter.EMBOSS)
-        return emboss.convert("RGB")
-
-    elif filter_name == "Карандашный набросок":
-        return _pencil_sketch(img)
-
-    return img
-
-
-def _lineart(img, thin=False):
-    from PIL import ImageFilter, ImageOps
-    gray = img.convert("L")
-    if thin:
-        # Canny-подобный: два прохода с разным порогом
-        edges1 = gray.filter(ImageFilter.Kernel(
-            size=(3, 3),
-            kernel=[-1, -1, -1, -1, 8, -1, -1, -1, -1],
-            scale=1, offset=0))
-        edges1 = ImageOps.invert(edges1)
-        edges1 = edges1.point(lambda x: 255 if x > 200 else 0)
-        return edges1.convert("RGB")
-    else:
-        edges = gray.filter(ImageFilter.FIND_EDGES)
-        edges = ImageOps.invert(edges)
-        edges = ImageEnhance.Contrast(edges.convert("RGB")).enhance(2.0)
-        return edges
-
-def _pencil_sketch(img):
-    """Эффект карандашного наброска"""
-    from PIL import ImageFilter, ImageOps
-    import numpy as np
-
-    gray = img.convert("L")
-
-    # Инвертируем
-    inv = ImageOps.invert(gray)
-
-    # Размытие инвертированного
-    blur = inv.filter(ImageFilter.GaussianBlur(radius=12))
-
-    # Color Dodge: result = gray * 256 / (256 - blur)
-    gray_arr = np.array(gray, dtype=np.float32)
-    blur_arr = np.array(blur, dtype=np.float32)
-
-    # Избегаем деления на 0
-    divisor = 256.0 - blur_arr
-    divisor[divisor == 0] = 1
-
-    result = np.clip(gray_arr * 256.0 / divisor, 0, 255).astype(np.uint8)
-
-    sketch = Image.fromarray(result, mode="L")
-    return sketch.convert("RGB")
-
-# ════════════════════════════════════════
-#  Ленивая генерация для больших данных
-# ════════════════════════════════════════
-
-def prepare_text_chunked(text, chunk_index=0, **kwargs):
-    """Генерирует текст и возвращает один чанк.
-    Returns: (chunk_lines, preview_img, total_chunks, total_lines)
-    """
-    from funnyprint.chunked import MAX_CHUNK_LINES, estimate_chunks
-    lines, full_preview = prepare_text(text, **kwargs)
-    total = len(lines)
-    chunks = estimate_chunks(total)
-    start = chunk_index * MAX_CHUNK_LINES
-    end = min(start + MAX_CHUNK_LINES, total)
-    chunk = lines[start:end]
-
-    # Превью только для текущего чанка
-    chunk_h = len(chunk) * 2
-    if chunk_h % 2:
-        chunk_h += 1
-    preview = Image.new("1", (PRINTER_WIDTH, max(2, chunk_h)), color=1)
-    # Рендерим из funny_lines обратно
-    preview = _lines_to_preview(chunk)
-
-    return chunk, preview, chunks, total
 
 
 def prepare_batch_images_chunked(paths, chunk_index=0, feed_between=50,
-                                 **kwargs):
-    """Batch картинок с чанками — обрабатывает только нужные файлы.
-    Returns: (chunk_lines, preview_img, total_chunks, total_files)
-    """
+                                 **filters):
     from funnyprint.chunked import MAX_CHUNK_LINES
-    from funnyprint.borders import apply_border
+    rotation = filters.get("rotation", 0)
+    flt = {k: v for k, v in filters.items() if k != "rotation"}
 
-    border = kwargs.pop("border", "Нет")
-
-    # Сначала оцениваем размеры каждой картинки (без полной обработки)
+    # Оцениваем размеры без полной обработки
     file_line_counts = []
     for path in paths:
         try:
             img = Image.open(path)
             w, h = img.size
-            new_h = max(2, int(h * PRINTER_WIDTH / w))
-            funny_count = (new_h + 1) // 2
-            file_line_counts.append(funny_count)
+            file_line_counts.append((max(2, int(h * PRINTER_WIDTH / w)) + 1) // 2)
             img.close()
         except Exception:
-            file_line_counts.append(50)  # fallback
+            file_line_counts.append(50)
 
-    # Добавляем промотку между файлами
     feed_lines = feed_between // 2 if feed_between > 0 else 0
 
-    # Определяем какие файлы попадают в какой чанк
-    chunks_map = []  # [(start_file, end_file), ...]
-    current_lines = 0
-    chunk_start = 0
+    # Разбиваем на чанки
+    chunks_map, cur_lines, chunk_start = [], 0, 0
     for i, fc in enumerate(file_line_counts):
-        if current_lines + fc > MAX_CHUNK_LINES and current_lines > 0:
+        if cur_lines + fc > MAX_CHUNK_LINES and cur_lines > 0:
             chunks_map.append((chunk_start, i))
-            chunk_start = i
-            current_lines = 0
-        current_lines += fc + feed_lines
+            chunk_start, cur_lines = i, 0
+        cur_lines += fc + feed_lines
     chunks_map.append((chunk_start, len(paths)))
 
     total_chunks = len(chunks_map)
-    if chunk_index >= total_chunks:
-        chunk_index = total_chunks - 1
-
-    # Обрабатываем только файлы текущего чанка
+    chunk_index = min(chunk_index, total_chunks - 1)
     start_file, end_file = chunks_map[chunk_index]
-    chunk_paths = paths[start_file:end_file]
 
     images_bw = []
-    for path in chunk_paths:
+    for path in paths[start_file:end_file]:
         try:
-            img = Image.open(path)
-            if img.mode in ("RGBA", "LA", "PA"):
-                bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-                bg.paste(img, mask=img.split()[-1])
-                img = bg.convert("RGB")
-            elif img.mode != "RGB":
-                img = img.convert("RGB")
-
-            rotation = kwargs.get("rotation", 0)
-            if rotation:
-                img = img.rotate(-rotation, expand=True,
-                                 fillcolor=(255, 255, 255))
-            w, h = img.size
-            new_h = max(2, int(h * PRINTER_WIDTH / w))
-            if new_h % 2:
-                new_h += 1
-            img = img.resize((PRINTER_WIDTH, new_h), Image.LANCZOS)
-
-            img = apply_filters(img,
-                                kwargs.get("brightness", 0),
-                                kwargs.get("contrast", 0),
-                                kwargs.get("sharpness", 0))
-            img = apply_artistic_filter(img, kwargs.get("artistic", "Нет"))
-            if border != "Нет":
-                img = apply_border(img, border)
-                img = _fit_to_printer(img)
-
-            gray = img.convert("L")
-            bw = dither_image(gray, kwargs.get("dither", "Floyd-Steinberg"))
-            images_bw.append(bw)
+            img = _open_and_scale(path, rotation)
+            images_bw.append(_finalize_to_bw(img, **flt))
         except Exception:
             pass
 
-    # Склеиваем чанк
-    total_h = sum(im.height for im in images_bw)
-    if feed_between > 0 and len(images_bw) > 1:
-        total_h += feed_between * (len(images_bw) - 1)
-    if total_h % 2:
-        total_h += 1
-    if total_h < 2:
-        total_h = 2
-
-    combined = Image.new("1", (PRINTER_WIDTH, total_h), color=1)
-    y = 0
-    for i, bw in enumerate(images_bw):
-        combined.paste(bw, (0, y))
-        y += bw.height
-        if i < len(images_bw) - 1 and feed_between > 0:
-            y += feed_between
-
-    lines = pil_to_funny_lines(combined)
-    return lines, combined, total_chunks, len(paths)
+    combined = _combine_bw(images_bw, feed_between)
+    return pil_to_funny_lines(combined), combined, total_chunks, len(paths)
 
 
-def _lines_to_preview(funny_lines):
-    """funny_lines → PIL Image mode '1' для превью"""
-    h = len(funny_lines) * 2
-    if h < 2:
-        h = 2
-    if h % 2:
-        h += 1
-    img = Image.new("1", (PRINTER_WIDTH, h), color=1)
-    bpl = PRINTER_WIDTH // 8  # 48
-
-    y = 0
-    for fl in funny_lines:
-        for row in range(2):
-            if y >= h:
-                break
-            row_data = fl[row * 48:(row + 1) * 48]
-            for byte_idx, byte_val in enumerate(row_data):
-                for bit in range(8):
-                    x = byte_idx * 8 + bit
-                    if x < PRINTER_WIDTH:
-                        pixel = 0 if (byte_val >> (7 - bit)) & 1 else 1
-                        img.putpixel((x, y), pixel)
-            y += 1
-    return img
+def prepare_text_chunked(text, chunk_index=0, **kwargs):
+    from funnyprint.chunked import MAX_CHUNK_LINES, estimate_chunks
+    lines, _ = prepare_text(text, **kwargs)
+    total = len(lines)
+    chunks = estimate_chunks(total)
+    start = chunk_index * MAX_CHUNK_LINES
+    chunk = lines[start:min(start + MAX_CHUNK_LINES, total)]
+    return chunk, _lines_to_preview(chunk), chunks, total
