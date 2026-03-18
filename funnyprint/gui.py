@@ -1669,7 +1669,7 @@ class App:
         self._preview_label = f"{len(self.batch_paths)} картинок"
         self._items = None
 
-        for msg in self.service.get_document_warnings():
+        for msg in session.collect_warnings_for_current_source():
             self.log(msg)
 
         return lines, preview
