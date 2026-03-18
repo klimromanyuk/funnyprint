@@ -9,6 +9,7 @@ from funnyprint.imaging import (
     prepare_pdf_page_item,
     _lines_to_preview,
 )
+from funnyprint.imaging import _detect_image_container
 
 
 @dataclass(frozen=True)
@@ -136,9 +137,23 @@ class DocumentSession:
                 if self.source_type == "batch_images" and spec and spec[0] == "image":
                     errors.append((spec, e))
                     path = spec[1] if len(spec) > 1 else "?"
-                    self._warnings.append(
-                        f"Пропущена картинка: {path} ({e})"
-                    )
+                    detected = _detect_image_container(path)
+
+                    if detected == "heif":
+                        msg = (
+                            f"Пропущена картинка: {path} "
+                            f"(файл не является PNG/JPG, это HEIF/AVIF-подобный контейнер; "
+                            f"Pillow не может открыть его без дополнительного декодера)"
+                        )
+                    elif detected and path.lower().endswith(".png") and detected != "png":
+                        msg = (
+                            f"Пропущена картинка: {path} "
+                            f"(расширение .png не соответствует реальному формату: {detected})"
+                        )
+                    else:
+                        msg = f"Пропущена картинка: {path} ({e})"
+
+                    self._warnings.append(msg)
                     continue
                 raise
 

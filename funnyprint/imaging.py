@@ -416,6 +416,29 @@ def _open_image_robust(path):
     return img
 
 
+def _detect_image_container(path):
+    """Пытается определить реальный контейнер файла по сигнатуре."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(32)
+    except Exception:
+        return None
+
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if head.startswith(b"RIFF") and b"WEBP" in head[:16]:
+        return "webp"
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in (b"mif1", b"msf1", b"heic", b"heix", b"hevc", b"hevx",
+                     b"avif", b"avis"):
+            return "heif"
+        return "isobmff"
+    return None
+
+
 def _open_and_scale(path, rotation=0):
     """Открывает картинку, конвертирует в RGB, поворачивает, масштабирует."""
     img = _to_rgb(_open_image_robust(path))
