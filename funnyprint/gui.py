@@ -1447,6 +1447,10 @@ class App:
 
         self._preview_label = f"{len(self.batch_paths)} картинок"
         self._items = None
+
+        for msg in self.service.get_document_warnings():
+            self.log(msg)
+
         return lines, preview
 
     def _get_filters(self):

@@ -2,6 +2,7 @@
 
 import os
 import sys
+import warnings
 from itertools import islice
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
@@ -259,13 +260,27 @@ def _pencil_sketch(img):
 # ════════════════════════════════════════
 
 def _to_rgb(img):
-    """Конвертирует любой режим в RGB, убирая прозрачность."""
+    """Конвертирует любой режим в RGB, убирая прозрачность в белый фон.
+
+    Корректно обрабатывает:
+    - RGBA / LA / PA
+    - palette images с transparency
+    """
+    try:
+        if img.mode == "P" and "transparency" in img.info:
+            img = img.convert("RGBA")
+    except Exception:
+        pass
+
     if img.mode in ("RGBA", "LA", "PA"):
-        bg = Image.new("RGBA", img.size, (255, 255, 255, 255))
-        bg.paste(img, mask=img.split()[-1])
+        rgba = img.convert("RGBA")
+        bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+        bg.alpha_composite(rgba)
         return bg.convert("RGB")
+
     if img.mode != "RGB":
         return img.convert("RGB")
+
     return img
 
 
@@ -384,9 +399,26 @@ def finalize_image(img, brightness=0, contrast=0, sharpness=0,
     return pil_to_funny_lines(bw), bw
 
 
+def _open_image_robust(path):
+    """Пытается открыть изображение максимально терпимо.
+
+    Подавляет известные PIL warnings про palette transparency и
+    старается нормализовать изображение в память сразу.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Palette images with Transparency expressed in bytes should be converted to RGBA images",
+            category=UserWarning,
+        )
+        img = Image.open(path)
+        img.load()
+    return img
+
+
 def _open_and_scale(path, rotation=0):
     """Открывает картинку, конвертирует в RGB, поворачивает, масштабирует."""
-    img = _to_rgb(Image.open(path))
+    img = _to_rgb(_open_image_robust(path))
     if rotation:
         img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
     return _scale_to_width(img)

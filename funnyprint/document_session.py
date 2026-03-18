@@ -49,11 +49,14 @@ class DocumentSession:
         self._item_cache: dict[tuple, tuple[list[bytes], Any]] = {}
         self._layout: DocumentLayout | None = None
 
+        self._warnings: list[str] = []
+
     # ─────────────────────────────────────
     # Source setup
     # ─────────────────────────────────────
 
     def set_batch_images(self, paths, filters=None, feed_px=0, copies=1):
+        self._warnings = []
         self.source_type = "batch_images"
         self.source_data = {"paths": tuple(paths)}
         self.render_settings = RenderSettings.from_filters(filters or {})
@@ -63,6 +66,7 @@ class DocumentSession:
         self._layout = None
 
     def set_pdf(self, path, pages, filters=None, feed_px=0, copies=1):
+        self._warnings = []
         self.source_type = "pdf"
         self.source_data = {"path": path, "pages": tuple(pages)}
         self.render_settings = RenderSettings.from_filters(filters or {})
@@ -122,7 +126,31 @@ class DocumentSession:
         return result
 
     def get_rendered_items(self):
-        return [self._render_item(spec) for spec in self._item_specs]
+        rendered = []
+        errors = []
+
+        for spec in self._item_specs:
+            try:
+                rendered.append(self._render_item(spec))
+            except Exception as e:
+                if self.source_type == "batch_images" and spec and spec[0] == "image":
+                    errors.append((spec, e))
+                    path = spec[1] if len(spec) > 1 else "?"
+                    self._warnings.append(
+                        f"Пропущена картинка: {path} ({e})"
+                    )
+                    continue
+                raise
+
+        if not rendered and self._item_specs:
+            if errors:
+                first_spec, first_error = errors[0]
+                raise RuntimeError(
+                    f"Не удалось обработать ни одного изображения: {first_spec} -> {first_error}"
+                )
+            raise RuntimeError("Документ пуст")
+
+        return rendered
 
     def get_item_lines(self):
         return [lines for lines, _bw in self.get_rendered_items()]
@@ -167,7 +195,12 @@ class DocumentSession:
     # ─────────────────────────────────────
 
     def clear(self):
+        self._warnings = []
         self.source_type = None
         self.source_data = {}
         self._item_specs = []
         self._layout = None
+
+    @property
+    def warnings(self):
+        return list(self._warnings)

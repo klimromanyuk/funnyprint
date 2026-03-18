@@ -208,3 +208,6 @@ class PrintService:
             self._ble_loop.call_soon_threadsafe(self._ble_loop.stop)
         except Exception:
             pass
+
+    def get_document_warnings(self):
+        return self.document_session.warnings
