@@ -602,6 +602,60 @@ def get_pdf_page_count(path):
     return count
 
 
+def open_pdf_page_image(path, page_num=0):
+    """Открывает одну страницу PDF как PIL.Image RGB."""
+    import fitz
+    doc = fitz.open(path)
+    try:
+        page = doc[page_num]
+        zoom = PRINTER_WIDTH / page.rect.width * 2
+        pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+        return img
+    finally:
+        doc.close()
+
+
+def prepare_image_item(path, feed_px=0, **filters):
+    """Готовит один image-item для document session.
+
+    Возвращает:
+        (lines_with_feed, bw_preview_without_feed)
+    """
+    img = _open_and_scale(path, filters.get("rotation", 0))
+    lines, bw = finalize_image(img, **{**filters, "rotation": 0}, trim=False)
+
+    if feed_px > 0:
+        blank = bytes(96)
+        lines = list(lines) + [blank for _ in range(feed_px // 2)]
+    else:
+        lines = list(lines)
+
+    return lines, bw
+
+
+def prepare_pdf_page_item(path, page_num=0, feed_px=0, **filters):
+    """Готовит одну страницу PDF как item для document session.
+
+    Возвращает:
+        (lines_with_feed, bw_preview_without_feed)
+    """
+    img = open_pdf_page_image(path, page_num=page_num)
+    rotation = filters.get("rotation", 0)
+    if rotation:
+        img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
+    img = _fit_to_printer(img)
+    lines, bw = finalize_image(img, **{**filters, "rotation": 0}, trim=False)
+
+    if feed_px > 0:
+        blank = bytes(96)
+        lines = list(lines) + [blank for _ in range(feed_px // 2)]
+    else:
+        lines = list(lines)
+
+    return lines, bw
+
+
 # ════════════════════════════════════════
 #  QR / Barcode
 # ════════════════════════════════════════

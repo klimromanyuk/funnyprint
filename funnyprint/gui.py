@@ -842,6 +842,36 @@ class App:
             gap = feed // 2 if feed > 0 else 0
             copies = self._safe_int(self.copies_var, 1)
 
+            # Session-based сценарии (batch images, multi-page PDF)
+            # уже подготовили layout и текущий chunk.
+            if self._document_layout is not None and self._items is None:
+                total_ch = self._document_layout.chunk_count
+                if total_ch <= 0:
+                    total_ch = 1
+
+                if self.chunk_index >= total_ch:
+                    self.chunk_index = total_ch - 1
+                if self.chunk_index < 0:
+                    self.chunk_index = 0
+
+                self._update_chunk_nav(total_ch, self.chunk_index)
+
+                label = self._preview_label or ""
+                if total_ch > 1:
+                    label = f"{label} — часть {self.chunk_index + 1}/{total_ch}"
+                else:
+                    label = f"Напечатается: {label}"
+                if copies > 1:
+                    label += f" (×{copies})"
+
+                self.root.after(0, lambda l=label: self.will_print_lbl.config(text=l))
+
+                self.current_lines = lines
+                self.current_preview = preview
+                self._show_preview(self.current_preview)
+                self.loading_lbl.config(text="")
+                return
+
             from funnyprint.chunked import (
                 needs_chunking, MAX_CHUNK_LINES, estimate_chunks,
                 chunk_by_items)
@@ -926,6 +956,7 @@ class App:
             self.will_print_lbl.config(text=f"Напечатается: {msg}")
         self.current_lines = None
         self._document_layout = None
+        self.service.clear_document_session()
         self.root.after(0, _do)
 
     def _combine_items(self, bw_images, feed_gap):
@@ -973,6 +1004,7 @@ class App:
         if not self.pdf_path:
             self._clear_preview("[выбери PDF]")
             return None
+
         range_str = self.pdf_range_var.get().strip()
         try:
             pages = self._parse_page_range(range_str, self.pdf_page_count)
@@ -980,6 +1012,7 @@ class App:
             pages = [0]
         if not pages:
             pages = [0]
+
         flt = self._get_filters()
         name = os.path.basename(self.pdf_path)
 
@@ -989,27 +1022,28 @@ class App:
             lines, preview = prepare_pdf_page(
                 self.pdf_path, page_num=pages[0], **flt)
             self._preview_label = name
+            self._items = None
             return lines, preview
 
-        cache_key = ("pdf", self.pdf_path, tuple(pages), tuple(sorted(flt.items())))
-        if self._items_cache_key == cache_key and self._items:
-            page_items = self._items
-        else:
-            page_items = []
-            for pg in pages:
-                pg_lines, _ = prepare_pdf_page(
-                    self.pdf_path, page_num=pg, **flt)
-                page_items.append(pg_lines)
-            self._items_cache_key = cache_key
+        session = self.service.set_pdf_document(
+            self.pdf_path,
+            pages,
+            filters=flt,
+            feed_px=self._safe_int(self.feed_var, DEFAULT_FEED_AFTER),
+            copies=self._safe_int(self.copies_var, 1),
+        )
 
-        self._items = page_items
-        all_lines = []
-        for item in page_items:
-            all_lines.extend(item)
-        from funnyprint.imaging import _lines_to_preview
-        preview = _lines_to_preview(all_lines[:3000])
+        self._document_layout = session.ensure_layout()
+        total_ch = session.chunk_count
+        if self.chunk_index >= total_ch:
+            self.chunk_index = max(0, total_ch - 1)
+
+        lines = session.get_chunk_lines(self.chunk_index)
+        preview = session.get_chunk_preview(self.chunk_index)
+
         self._preview_label = f"{name} ({len(pages)} стр.)"
-        return all_lines, preview
+        self._items = None
+        return lines, preview
 
     def _preview_tab_richtext(self):
         rt = self.rt_widget.get("1.0", tk.END).strip()
@@ -1393,31 +1427,27 @@ class App:
     def _prepare_batch_items(self):
         if not self.batch_paths:
             return None
-        flt = self._get_filters()
-        cache_key = ("batch", tuple(self.batch_paths), tuple(sorted(flt.items())))
-        if self._items_cache_key == cache_key and self._items:
-            items = self._items
-        else:
-            items = []
-            for path in self.batch_paths:
-                try:
-                    lines, _ = prepare_image(path, **flt)
-                    items.append(lines)
-                except Exception:
-                    pass
-            if not items:
-                self._clear_preview("[ошибка загрузки]")
-                return None
-            self._items_cache_key = cache_key
 
-        self._items = items
-        all_lines = []
-        for item in items:
-            all_lines.extend(item)
-        from funnyprint.imaging import _lines_to_preview
-        preview = _lines_to_preview(all_lines[:3000])
+        flt = self._get_filters()
+
+        session = self.service.set_batch_images_document(
+            self.batch_paths,
+            filters=flt,
+            feed_px=self._safe_int(self.feed_var, DEFAULT_FEED_AFTER),
+            copies=self._safe_int(self.copies_var, 1),
+        )
+
+        self._document_layout = session.ensure_layout()
+        total_ch = session.chunk_count
+        if self.chunk_index >= total_ch:
+            self.chunk_index = max(0, total_ch - 1)
+
+        lines = session.get_chunk_lines(self.chunk_index)
+        preview = session.get_chunk_preview(self.chunk_index)
+
         self._preview_label = f"{len(self.batch_paths)} картинок"
-        return all_lines, preview
+        self._items = None
+        return lines, preview
 
     def _get_filters(self):
         return dict(

@@ -19,6 +19,7 @@ from funnyprint.imaging import (
 from funnyprint.printer import find_and_connect, Printer
 from funnyprint.chunked import needs_chunking, MAX_CHUNK_LINES, estimate_chunks
 from funnyprint.document_engine import DocumentLayout, LayoutSettings
+from funnyprint.document_session import DocumentSession
 
 
 class PrintService:
@@ -31,6 +32,7 @@ class PrintService:
         self.on_progress = on_progress
         self.printer: Printer | None = None
         self.connected = False
+        self.document_session = DocumentSession()
 
         self._ble_loop = asyncio.new_event_loop()
         threading.Thread(
@@ -126,6 +128,37 @@ class PrintService:
 
     def prepare_batch_images_chunked(self, paths, **kwargs):
         return prepare_batch_images_chunked(paths, **kwargs)
+
+    def set_batch_images_document(self, paths, filters=None, feed_px=0, copies=1):
+        self.document_session.set_batch_images(
+            paths,
+            filters=filters,
+            feed_px=feed_px,
+            copies=copies,
+        )
+        return self.document_session
+
+    def set_pdf_document(self, path, pages, filters=None, feed_px=0, copies=1):
+        self.document_session.set_pdf(
+            path,
+            pages,
+            filters=filters,
+            feed_px=feed_px,
+            copies=copies,
+        )
+        return self.document_session
+
+    def get_document_chunk_count(self):
+        return self.document_session.chunk_count
+
+    def get_document_chunk_lines(self, chunk_index):
+        return self.document_session.get_chunk_lines(chunk_index)
+
+    def get_document_chunk_preview(self, chunk_index):
+        return self.document_session.get_chunk_preview(chunk_index)
+
+    def clear_document_session(self):
+        self.document_session.clear()
 
     def build_layout(self, items, copies=1, feed_px=0):
         """Строит layout-документ поверх уже готовых items.
