@@ -746,6 +746,26 @@ def prepare_pdf_page_item(path, page_num=0, feed_px=0, **filters):
     return lines, bw
 
 
+def load_image_base(path, rotation=0):
+    """Грузит базовое изображение для item cache.
+
+    Это стадия ДО применения filters/dither/border.
+    """
+    return _open_and_scale(path, rotation)
+
+
+def load_pdf_page_base(path, page_num=0, rotation=0):
+    """Грузит базовое изображение страницы PDF для item cache.
+
+    Это стадия ДО применения filters/dither/border.
+    """
+    img = open_pdf_page_image(path, page_num=page_num)
+    if rotation:
+        img = img.rotate(-rotation, expand=True, fillcolor=(255, 255, 255))
+    img = _fit_to_printer(img)
+    return img
+
+
 # ════════════════════════════════════════
 #  QR / Barcode
 # ════════════════════════════════════════

@@ -3,10 +3,13 @@
 from dataclasses import dataclass
 from typing import Any
 
+from PIL import Image
+
 from funnyprint.document_engine import DocumentLayout, LayoutSettings
 from funnyprint.imaging import (
-    prepare_image_item,
-    prepare_pdf_page_item,
+    load_image_base,
+    load_pdf_page_base,
+    finalize_image,
     _lines_to_preview,
 )
 from funnyprint.imaging import _detect_image_container
@@ -48,6 +51,7 @@ class DocumentSession:
 
         self._item_specs: list[tuple] = []
         self._item_cache: dict[tuple, tuple[list[bytes], Any]] = {}
+        self._base_image_cache: dict[tuple, Image.Image] = {}
         self._layout: DocumentLayout | None = None
 
         self._warnings: list[str] = []
@@ -58,6 +62,7 @@ class DocumentSession:
 
     def set_batch_images(self, paths, filters=None, feed_px=0, copies=1):
         self._warnings = []
+        self._base_image_cache = {}
         self.source_type = "batch_images"
         self.source_data = {"paths": tuple(paths)}
         self.render_settings = RenderSettings.from_filters(filters or {})
@@ -68,6 +73,7 @@ class DocumentSession:
 
     def set_pdf(self, path, pages, filters=None, feed_px=0, copies=1):
         self._warnings = []
+        self._base_image_cache = {}
         self.source_type = "pdf"
         self.source_data = {"path": path, "pages": tuple(pages)}
         self.render_settings = RenderSettings.from_filters(filters or {})
@@ -102,27 +108,28 @@ class DocumentSession:
         if key in self._item_cache:
             return self._item_cache[key]
 
-        kind = spec[0]
         filters = self.render_settings.__dict__.copy()
+        base_img = self._get_base_image(spec)
 
-        if kind == "image":
-            _, path = spec
-            result = prepare_image_item(
-                path,
-                feed_px=self.feed_px,
-                **filters,
-            )
-        elif kind == "pdf_page":
-            _, path, page_num = spec
-            result = prepare_pdf_page_item(
-                path,
-                page_num=page_num,
-                feed_px=self.feed_px,
-                **filters,
-            )
+        lines, bw = finalize_image(
+            base_img,
+            brightness=filters["brightness"],
+            contrast=filters["contrast"],
+            sharpness=filters["sharpness"],
+            dither=filters["dither"],
+            rotation=0,
+            artistic=filters["artistic"],
+            border=filters["border"],
+            trim=False,
+        )
+
+        if self.feed_px > 0:
+            blank = bytes(96)
+            lines = list(lines) + [blank for _ in range(self.feed_px // 2)]
         else:
-            raise ValueError(f"Unsupported item spec: {spec}")
+            lines = list(lines)
 
+        result = (lines, bw)
         self._item_cache[key] = result
         return result
 
@@ -215,7 +222,47 @@ class DocumentSession:
         self.source_data = {}
         self._item_specs = []
         self._layout = None
+        self._base_image_cache = {}
 
     @property
     def warnings(self):
         return list(self._warnings)
+    
+
+
+    def _base_cache_key(self, spec):
+        kind = spec[0]
+        rotation = self.render_settings.rotation
+
+        if kind == "image":
+            _, path = spec
+            return ("image", path, rotation)
+
+        if kind == "pdf_page":
+            _, path, page_num = spec
+            return ("pdf_page", path, page_num, rotation)
+
+        return (kind, spec, rotation)
+
+    def _get_base_image(self, spec):
+        key = self._base_cache_key(spec)
+        if key in self._base_image_cache:
+            return self._base_image_cache[key].copy()
+
+        kind = spec[0]
+
+        if kind == "image":
+            _, path = spec
+            img = load_image_base(path, rotation=self.render_settings.rotation)
+        elif kind == "pdf_page":
+            _, path, page_num = spec
+            img = load_pdf_page_base(
+                path,
+                page_num=page_num,
+                rotation=self.render_settings.rotation,
+            )
+        else:
+            raise ValueError(f"Unsupported item spec: {spec}")
+
+        self._base_image_cache[key] = img.copy()
+        return img
