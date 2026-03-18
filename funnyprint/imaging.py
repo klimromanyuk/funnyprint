@@ -6,6 +6,7 @@ import warnings
 from itertools import islice
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+import numpy as np
 
 try:
     from pillow_heif import register_heif_opener
@@ -140,22 +141,29 @@ _DIFFUSION_MATRICES = {
 
 def _error_diffusion(img_gray, matrix, divisor):
     w, h = img_gray.size
-    data = list(img_gray.getdata())
-    px = [list(data[i * w:(i + 1) * w]) for i in range(h)]
-    out = Image.new("1", (w, h))
-    op = out.load()
+    px = np.array(img_gray, dtype=np.float32)
+    out = np.empty((h, w), dtype=np.uint8)
+
     for y in range(h):
+        row = px[y]
         for x in range(w):
-            old = px[y][x]
-            new = 255 if old > 127 else 0
-            op[x, y] = new
+            old = row[x]
+            new = 255.0 if old > 127 else 0.0
+            out[y, x] = 255 if new > 0 else 0
             err = old - new
+
+            if err == 0:
+                continue
+
             for dx, dy, c in matrix:
                 nx, ny = x + dx, y + dy
                 if 0 <= nx < w and 0 <= ny < h:
-                    px[ny][nx] = max(0, min(255,
-                        int(px[ny][nx] + err * c / divisor)))
-    return out
+                    px[ny, nx] += err * c / divisor
+
+        # Ограничиваем строку/массив периодически, чтобы не накапливался мусор
+        np.clip(px, 0, 255, out=px)
+
+    return Image.fromarray(out, mode="L").convert("1")
 
 
 def _ordered_dither(img_gray, size=4):

@@ -126,6 +126,41 @@ class App:
 
         return order
 
+    def _refresh_loading_state(self):
+        """Единая точка обновления loading text/progress для preview."""
+        session = self.service.document_session
+        total = self.total_chunks if self.total_chunks > 0 else 1
+        ready = 0
+        if session and session.source_type in ("batch_images", "pdf"):
+            try:
+                ready = session.count_warmed_chunks()
+            except Exception:
+                ready = 0
+
+        queue_len = len(self._queued_chunk_renders)
+        self._update_render_progress(ready, total, queue_len)
+
+        # Если текущий visible chunk ещё не готов — показываем это явно.
+        if (
+            session
+            and session.source_type in ("batch_images", "pdf")
+            and self._document_layout is not None
+            and not session.has_chunk_preview(self.chunk_index)
+        ):
+            self.loading_lbl.config(
+                text=f"Рендер части {self.chunk_index + 1}/{total}... | В очереди: {queue_len}"
+            )
+            return
+
+        if queue_len > 0:
+            self.loading_lbl.config(
+                text=f"Готово чанков: {ready}/{total} | В очереди: {queue_len}"
+            )
+        elif ready < total and total > 1:
+            self.loading_lbl.config(text=f"Готово чанков: {ready}/{total}")
+        else:
+            self.loading_lbl.config(text="")
+
     def _start_warming_chunks(self, revision):
         return
 
@@ -179,12 +214,20 @@ class App:
 
         idx = min(max(0, chunk_index), total - 1)
 
-        self._queued_chunk_renders.add((revision, idx))
-        # Если уже прогрето — показываем сразу
+        # Если already ready — просто показать сразу и не трогать очередь.
         if session.has_chunk_preview(idx):
             if idx == self.chunk_index:
                 self._show_chunk()
+            self._refresh_loading_state()
             return
+
+        task_key = (revision, idx)
+        if task_key in self._queued_chunk_renders:
+            self._refresh_loading_state()
+            return
+
+        self._queued_chunk_renders.add(task_key)
+        self._refresh_loading_state()
 
         def _task():
             try:
@@ -195,7 +238,10 @@ class App:
                     lines = session.get_chunk_lines(idx)
                     preview = session.get_chunk_preview(idx)
                 except Exception as e:
-                    self.root.after(0, lambda err=e: self.log(f"Ошибка рендера чанка: {err}"))
+                    self.root.after(
+                        0,
+                        lambda err=e: self.log(f"Ошибка рендера чанка: {err}")
+                    )
                     return
 
                 if revision != self._preview_revision:
@@ -205,8 +251,11 @@ class App:
                     if revision != self._preview_revision:
                         return
 
-                    total_ready = session.count_warmed_chunks()
-                    total_chunks = self._document_layout.chunk_count if self._document_layout else total
+                    total_chunks = (
+                        self._document_layout.chunk_count
+                        if self._document_layout is not None
+                        else total
+                    )
 
                     if idx == self.chunk_index:
                         self.current_lines = lines
@@ -224,15 +273,14 @@ class App:
                             label += f" (×{copies})"
                         self.will_print_lbl.config(text=label)
 
-                    queue_len = len(self._queued_chunk_renders)
-                    self._update_render_progress(total_ready, total_chunks, queue_len)
+                    self._refresh_loading_state()
 
                 self.root.after(0, _apply)
             finally:
-                self._queued_chunk_renders.discard((revision, idx))
+                self._queued_chunk_renders.discard(task_key)
+                self.root.after(0, self._refresh_loading_state)
 
-        task_id = (revision, idx)
-        self._render_queue.submit(priority, task_id, _task)
+        self._render_queue.submit(priority, task_key, _task)
 
     def _build_ui(self):
         conn = self._build_connection()
@@ -880,16 +928,6 @@ class App:
 
         def _do():
             self.render_progress["value"] = pct
-
-            # Не затираем полезный loading/status, если сейчас идёт подготовка
-            if queue_len > 0:
-                self.loading_lbl.config(
-                    text=f"Готово чанков: {ready}/{total} | В очереди: {queue_len}"
-                )
-            elif ready < total:
-                self.loading_lbl.config(text=f"Готово чанков: {ready}/{total}")
-            else:
-                self.loading_lbl.config(text="")
         self.root.after(0, _do)
 
     def _safe_int(self, var, default=0):
@@ -950,9 +988,7 @@ class App:
 
     def _preview_done(self):
         self._preview_busy = False
-        if not self._queued_chunk_renders:
-            # Если текущий чанк уже обновился, loading_lbl позже сам очистится
-            pass
+        self._refresh_loading_state()
 
     def _update_preview(self, revision=None):
         self._update_timer = None
@@ -1025,8 +1061,7 @@ class App:
                 ready = self.service.document_session.count_warmed_chunks()
                 self._update_render_progress(ready, total_ch, queue_len)
 
-                if revision == self._preview_revision:
-                    self.root.after(0, lambda: self.loading_lbl.config(text=""))
+                self.root.after(0, self._refresh_loading_state)
                 return
 
             from funnyprint.imaging import _lines_to_preview
@@ -1359,12 +1394,6 @@ class App:
         if self.chunk_index < 0:
             self.chunk_index = 0
 
-        session = self.service.document_session
-        use_session_preview = (
-            session is not None
-            and session.source_type in ("batch_images", "pdf")
-        )
-
         self._update_chunk_nav(total, self.chunk_index)
 
         copies = self._safe_int(self.copies_var, 1)
@@ -1377,6 +1406,12 @@ class App:
             label += f" (×{copies})"
         self.root.after(0, lambda l=label: self.will_print_lbl.config(text=l))
 
+        session = self.service.document_session
+        use_session_preview = (
+            session is not None
+            and session.source_type in ("batch_images", "pdf")
+        )
+
         if use_session_preview:
             if session.has_chunk_preview(self.chunk_index):
                 lines = session.get_chunk_lines(self.chunk_index)
@@ -1384,14 +1419,8 @@ class App:
                 self.current_lines = lines
                 self.current_preview = preview
                 self._show_preview(preview)
-                self.loading_lbl.config(text="")
+                self._refresh_loading_state()
             else:
-                queue_len = len(self._queued_chunk_renders)
-                ready = session.count_warmed_chunks()
-                self._update_render_progress(ready, total, queue_len)
-                self.loading_lbl.config(
-                    text=f"Рендер части {self.chunk_index + 1}/{total}... | В очереди: {queue_len}"
-                )
                 self._request_chunk_render(self.chunk_index, priority=0)
             return
 
@@ -1402,7 +1431,7 @@ class App:
         self.current_lines = lines
         self.current_preview = preview
         self._show_preview(self.current_preview)
-        self.loading_lbl.config(text="")
+        self._refresh_loading_state()
 
     def _update_chunk_nav(self, total, current):
         self.total_chunks = total
