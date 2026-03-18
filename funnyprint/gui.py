@@ -992,11 +992,29 @@ class App:
     def _preview_tab_image(self):
         if self.batch_paths:
             return self._prepare_batch_items()
+
         if not self.image_path:
             self._clear_preview("[выбери картинку]")
             return None
-        all_lines, full_preview = prepare_image(
-            self.image_path, **self._get_filters())
+
+        try:
+            all_lines, full_preview = prepare_image(
+                self.image_path, **self._get_filters())
+        except Exception as e:
+            from funnyprint.imaging import _detect_image_container
+
+            detected = _detect_image_container(self.image_path)
+            if detected == "heif":
+                self._clear_preview("[неподдерживаемый формат изображения]")
+                self.log(
+                    "Файл похож на HEIF/AVIF-контейнер. "
+                    "Если расширение неверное, переименуй файл или переконвертируй его."
+                )
+                return None
+
+            self._clear_preview("[ошибка загрузки картинки]")
+            raise
+
         self._preview_label = os.path.basename(self.image_path)
         return all_lines, full_preview
 

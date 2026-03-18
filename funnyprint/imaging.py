@@ -7,6 +7,13 @@ from itertools import islice
 from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
+try:
+    from pillow_heif import register_heif_opener
+    register_heif_opener()
+    _HEIF_SUPPORT = True
+except Exception:
+    _HEIF_SUPPORT = False
+
 from funnyprint import PRINTER_WIDTH
 
 # ════════════════════════════════════════
@@ -402,18 +409,46 @@ def finalize_image(img, brightness=0, contrast=0, sharpness=0,
 def _open_image_robust(path):
     """Пытается открыть изображение максимально терпимо.
 
-    Подавляет известные PIL warnings про palette transparency и
-    старается нормализовать изображение в память сразу.
+    Подавляет известные PIL warnings про palette transparency,
+    поддерживает HEIF/AVIF через pillow-heif, если он установлен.
     """
+    detected = _detect_image_container(path)
+
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
             message="Palette images with Transparency expressed in bytes should be converted to RGBA images",
             category=UserWarning,
         )
-        img = Image.open(path)
-        img.load()
-    return img
+
+        try:
+            img = Image.open(path)
+            img.load()
+            return img
+        except Exception as first_error:
+            # Если это HEIF/AVIF-подобный контейнер, а plugin не помог,
+            # даём более понятную ошибку.
+            if detected == "heif":
+                if not _HEIF_SUPPORT:
+                    raise RuntimeError(
+                        f"Файл выглядит как HEIF/AVIF, но поддержка HEIF не установлена: {path}"
+                    ) from first_error
+
+                # После register_heif_opener() обычный Image.open уже должен работать,
+                # но попробуем ещё раз через bytes на случай странного пути/расширения.
+                try:
+                    with open(path, "rb") as f:
+                        data = f.read()
+                    from io import BytesIO
+                    img = Image.open(BytesIO(data))
+                    img.load()
+                    return img
+                except Exception as second_error:
+                    raise RuntimeError(
+                        f"Не удалось открыть HEIF/AVIF изображение: {path}"
+                    ) from second_error
+
+            raise
 
 
 def _detect_image_container(path):
