@@ -375,6 +375,19 @@ def add_feed_preview(img_1bit, feed_px):
     return result
 
 
+def append_feed_bw(img_1bit, feed_px):
+    """Возвращает bw-image с добавленным белым feed внизу."""
+    if feed_px <= 0:
+        return img_1bit
+    w, h = img_1bit.size
+    new_h = h + feed_px
+    if new_h % 2:
+        new_h += 1
+    result = Image.new("1", (w, new_h), color=1)
+    result.paste(img_1bit, (0, 0))
+    return result
+
+
 # ════════════════════════════════════════
 #  Финализация (общий конвейер)
 # ════════════════════════════════════════

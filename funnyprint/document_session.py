@@ -10,6 +10,7 @@ from funnyprint.imaging import (
     load_image_base,
     load_pdf_page_base,
     finalize_image,
+    append_feed_bw,
     _lines_to_preview,
 )
 from funnyprint.imaging import _detect_image_container
@@ -52,6 +53,7 @@ class DocumentSession:
         self._item_specs: list[tuple] = []
         self._item_cache: dict[tuple, tuple[list[bytes], Any]] = {}
         self._base_image_cache: dict[tuple, Image.Image] = {}
+        self._chunk_preview_cache: dict[tuple, Any] = {}
         self._layout: DocumentLayout | None = None
 
         self._warnings: list[str] = []
@@ -70,6 +72,7 @@ class DocumentSession:
         self.copies = max(1, int(copies))
         self._item_specs = [("image", path) for path in paths]
         self._layout = None
+        self._chunk_preview_cache = {}
 
     def set_pdf(self, path, pages, filters=None, feed_px=0, copies=1):
         self._warnings = []
@@ -81,6 +84,7 @@ class DocumentSession:
         self.copies = max(1, int(copies))
         self._item_specs = [("pdf_page", path, int(pg)) for pg in pages]
         self._layout = None
+        self._chunk_preview_cache = {}
 
     def set_layout(self, feed_px=0, copies=1):
         feed_px = max(0, int(feed_px))
@@ -89,12 +93,14 @@ class DocumentSession:
             self.feed_px = feed_px
             self.copies = copies
             self._layout = None
+            self._chunk_preview_cache = {}
 
     def set_filters(self, filters):
         new_settings = RenderSettings.from_filters(filters or {})
         if new_settings != self.render_settings:
             self.render_settings = new_settings
             self._layout = None
+            self._chunk_preview_cache = {}
 
     # ─────────────────────────────────────
     # Item render
@@ -126,6 +132,7 @@ class DocumentSession:
         if self.feed_px > 0:
             blank = bytes(96)
             lines = list(lines) + [blank for _ in range(self.feed_px // 2)]
+            bw = append_feed_bw(bw, self.feed_px)
         else:
             lines = list(lines)
 
@@ -209,8 +216,7 @@ class DocumentSession:
         return layout.assemble_chunk_lines(chunk_index)
 
     def get_chunk_preview(self, chunk_index):
-        lines = self.get_chunk_lines(chunk_index)
-        return _lines_to_preview(lines)
+        return self.get_chunk_preview_fast(chunk_index)
 
     # ─────────────────────────────────────
     # Misc
@@ -223,6 +229,7 @@ class DocumentSession:
         self._item_specs = []
         self._layout = None
         self._base_image_cache = {}
+        self._chunk_preview_cache = {}
 
     @property
     def warnings(self):
@@ -266,3 +273,61 @@ class DocumentSession:
 
         self._base_image_cache[key] = img.copy()
         return img
+
+
+    def get_chunk_preview_fast(self, chunk_index):
+        layout = self.ensure_layout()
+        chunk = layout.get_chunk(chunk_index)
+
+        cache_key = (
+            chunk_index,
+            self.source_type,
+            self.source_data.get("path"),
+            self.source_data.get("paths"),
+            self.source_data.get("pages"),
+            self.render_settings,
+            self.feed_px,
+            self.copies,
+        )
+        cached = self._chunk_preview_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
+
+        rendered_items = self.get_rendered_items()
+
+        total_h = 0
+        for seg in chunk.segments:
+            if seg.kind == "item":
+                _lines, bw = rendered_items[seg.item_index]
+                seg_h = seg.length * 2
+                total_h += seg_h
+            elif seg.kind == "gap":
+                total_h += seg.length * 2
+
+        total_h = max(2, total_h)
+        if total_h % 2:
+            total_h += 1
+
+        from PIL import Image
+        preview = Image.new("1", (384, total_h), color=1)
+
+        y = 0
+        for seg in chunk.segments:
+            if seg.length <= 0:
+                continue
+
+            if seg.kind == "gap":
+                y += seg.length * 2
+                continue
+
+            if seg.kind == "item":
+                _lines, bw = rendered_items[seg.item_index]
+                top = seg.start * 2
+                bottom = top + seg.length * 2
+                cropped = bw.crop((0, top, bw.width, bottom))
+                preview.paste(cropped, (0, y))
+                y += cropped.height
+                continue
+
+        self._chunk_preview_cache[cache_key] = preview.copy()
+        return preview
