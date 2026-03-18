@@ -779,6 +779,44 @@ def load_pdf_page_base(path, page_num=0, rotation=0):
     return img
 
 
+def estimate_image_item_lines(path, rotation=0, feed_px=0):
+    """Оценивает количество funny lines для image item без полного рендера."""
+    img = _open_image_robust(path)
+    w, h = img.size
+    if rotation and rotation % 180 != 0:
+        w, h = h, w
+    scaled_h = max(2, int(h * PRINTER_WIDTH / w))
+    if scaled_h % 2:
+        scaled_h += 1
+    line_count = scaled_h // 2
+    if feed_px > 0:
+        line_count += feed_px // 2
+    return line_count
+
+
+def estimate_pdf_page_item_lines(path, page_num=0, rotation=0, feed_px=0):
+    """Оценивает количество funny lines для одной страницы PDF."""
+    import fitz
+    doc = fitz.open(path)
+    try:
+        page = doc[page_num]
+        w = int(page.rect.width)
+        h = int(page.rect.height)
+    finally:
+        doc.close()
+
+    if rotation and rotation % 180 != 0:
+        w, h = h, w
+
+    scaled_h = max(2, int(h * PRINTER_WIDTH / w))
+    if scaled_h % 2:
+        scaled_h += 1
+    line_count = scaled_h // 2
+    if feed_px > 0:
+        line_count += feed_px // 2
+    return line_count
+
+
 # ════════════════════════════════════════
 #  QR / Barcode
 # ════════════════════════════════════════

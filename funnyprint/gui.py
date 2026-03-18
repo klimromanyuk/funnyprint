@@ -18,6 +18,7 @@ from funnyprint.imaging import (
 )
 from funnyprint.service import PrintService
 from funnyprint.document_engine import DocumentLayout
+from funnyprint.render_queue import RenderQueue
 
 
 class PrintButton(tk.Canvas):
@@ -83,9 +84,15 @@ class App:
         self._preview_tk = None
         self._update_timer = None
         self._preview_busy = False
+        self._preview_revision = 0
+        self._warming_thread = None
+        self._warming_busy = False
+        self._last_warmed_count = 0
+        self._render_queue = RenderQueue()
         self._zoom = 1.0
         self._last_tab = -1
 
+        self._queued_chunk_renders = set()
         self._items = None
         self._preview_label = ""
         self._items_cache_key = None
@@ -100,6 +107,27 @@ class App:
         self.service = PrintService(
             on_log=self.log, on_progress=self._set_progress)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _build_warm_order(self, total, current):
+        if total <= 1:
+            return []
+
+        order = []
+        left = current - 1
+        right = current + 1
+
+        while left >= 0 or right < total:
+            if right < total:
+                order.append(right)
+                right += 1
+            if left >= 0:
+                order.append(left)
+                left -= 1
+
+        return order
+
+    def _start_warming_chunks(self, revision):
+        return
 
     def log(self, msg):
         self.root.after(0, self._log_write, msg)
@@ -138,6 +166,78 @@ class App:
             if not busy:
                 self.root.after(1500, lambda: self.print_btn.set_progress(0))
         self.root.after(0, _u)
+
+    def _request_chunk_render(self, chunk_index, priority=0):
+        session = self.service.document_session
+        if not session or not self._document_layout:
+            return
+
+        revision = self._preview_revision
+        total = self._document_layout.chunk_count
+        if total <= 0:
+            total = 1
+
+        idx = min(max(0, chunk_index), total - 1)
+
+        self._queued_chunk_renders.add((revision, idx))
+        # Если уже прогрето — показываем сразу
+        if session.has_chunk_preview(idx):
+            if idx == self.chunk_index:
+                self._show_chunk()
+            return
+
+        def _task():
+            try:
+                if revision != self._preview_revision:
+                    return
+
+                try:
+                    lines = session.get_chunk_lines(idx)
+                    preview = session.get_chunk_preview(idx)
+                except Exception as e:
+                    self.root.after(0, lambda err=e: self.log(f"Ошибка рендера чанка: {err}"))
+                    return
+
+                if revision != self._preview_revision:
+                    return
+
+                def _apply():
+                    if revision != self._preview_revision:
+                        return
+
+                    total_ready = session.count_warmed_chunks()
+                    total_chunks = self._document_layout.chunk_count if self._document_layout else total
+
+                    if idx == self.chunk_index:
+                        self.current_lines = lines
+                        self.current_preview = preview
+                        self._show_preview(preview)
+                        self._update_chunk_nav(total_chunks, idx)
+
+                        copies = self._safe_int(self.copies_var, 1)
+                        label = self._preview_label or ""
+                        if total_chunks > 1:
+                            label = f"{label} — часть {idx + 1}/{total_chunks}"
+                        else:
+                            label = f"Напечатается: {label}"
+                        if copies > 1:
+                            label += f" (×{copies})"
+                        self.will_print_lbl.config(text=label)
+
+                    queue_len = len(self._queued_chunk_renders)
+                    if queue_len > 0:
+                        self.loading_lbl.config(
+                            text=f"Готово чанков: {total_ready}/{total_chunks} | В очереди: {queue_len}"
+                        )
+                    else:
+                        self.loading_lbl.config(text="")
+
+                self.root.after(0, _apply)
+            finally:
+                self._queued_chunk_renders.discard((revision, idx))
+
+        task_id = (revision, idx)
+        self._render_queue.submit(priority, task_id, _task)
 
     def _build_ui(self):
         conn = self._build_connection()
@@ -758,6 +858,7 @@ class App:
             self.root.after_cancel(self._update_timer)
         tab = self._get_tab()
         self._document_layout = None
+        self._preview_revision += 1
         delay = 800 if tab in (4, 5) else 300
         self._update_timer = self.root.after(delay, self._start_preview)
 
@@ -798,15 +899,20 @@ class App:
     def _start_preview(self):
         """Запускает _update_preview в фоновом потоке."""
         if self._preview_busy:
-            self._schedule()
             return
-        self._preview_busy = True
-        self.loading_lbl.config(text="Загрузка...")
-        threading.Thread(target=self._bg_preview, daemon=True).start()
 
-    def _bg_preview(self):
+        self._preview_busy = True
+        revision = self._preview_revision
+        self.loading_lbl.config(text="Загрузка...")
+        threading.Thread(
+            target=self._bg_preview,
+            args=(revision,),
+            daemon=True
+        ).start()
+
+    def _bg_preview(self, revision):
         try:
-            self._update_preview()
+            self._update_preview(revision=revision)
         except Exception as e:
             self.root.after(0, lambda: self.log(f"Ошибка превью: {e}"))
         finally:
@@ -816,8 +922,11 @@ class App:
         self._preview_busy = False
         self.loading_lbl.config(text="")
 
-    def _update_preview(self):
+    def _update_preview(self, revision=None):
         self._update_timer = None
+        if revision is None:
+            revision = self._preview_revision
+
         tab = self._get_tab()
         self._last_tab = tab
         self._items = None
@@ -825,21 +934,24 @@ class App:
         self._preview_label = ""
 
         try:
-            _handlers = [
+            handlers = [
                 self._preview_tab_image, self._preview_tab_pdf,
                 self._preview_tab_richtext, self._preview_tab_text,
                 self._preview_tab_qr, self._preview_tab_barcode,
             ]
-            if tab >= len(_handlers):
+            if tab >= len(handlers):
                 return
-            result = _handlers[tab]()
+
+            result = handlers[tab]()
             if result is None:
-                self.loading_lbl.config(text="")
+                self.root.after(0, lambda: self.loading_lbl.config(text=""))
+                return
+
+            if revision != self._preview_revision:
                 return
 
             lines, preview = result
             feed = self._safe_int(self.feed_var, DEFAULT_FEED_AFTER)
-            gap = feed // 2 if feed > 0 else 0
             copies = self._safe_int(self.copies_var, 1)
 
             # Session-based сценарии (batch images, multi-page PDF)
@@ -864,20 +976,35 @@ class App:
                 if copies > 1:
                     label += f" (×{copies})"
 
-                self.root.after(0, lambda l=label: self.will_print_lbl.config(text=l))
+                self.root.after(
+                    0,
+                    lambda l=label: self.will_print_lbl.config(text=l)
+                )
 
                 self.current_lines = lines
                 self.current_preview = preview
                 self._show_preview(self.current_preview)
-                self.loading_lbl.config(text="")
+
+                # Прогрев ближайших чанков через живую очередь
+                for idx in self._build_warm_order(total_ch, self.chunk_index):
+                    self._request_chunk_render(idx, priority=10 + abs(idx - self.chunk_index))
+
+                queue_len = len(self._queued_chunk_renders)
+                ready = self.service.document_session.count_warmed_chunks()
+                self.root.after(
+                    0,
+                    lambda q=queue_len, r=ready, t=total_ch: self.loading_lbl.config(
+                        text=f"Готово чанков: {r}/{t} | В очереди: {q}"
+                    ) if q > 0 else self.loading_lbl.config(text="")
+                )
+
+                if revision == self._preview_revision:
+                    self.root.after(0, lambda: self.loading_lbl.config(text=""))
                 return
 
-            from funnyprint.chunked import (
-                needs_chunking, MAX_CHUNK_LINES, estimate_chunks,
-                chunk_by_items)
             from funnyprint.imaging import _lines_to_preview
 
-            # Каждый item должен уже содержать feed в конце.
+            # Legacy path: items формируются в GUI, feed встроим в каждый item
             if self._items and len(self._items) > 1:
                 items = [
                     self._append_feed_to_item(item, feed)
@@ -904,48 +1031,39 @@ class App:
 
             lines = layout.assemble_chunk_lines(self.chunk_index)
 
-            # Пока preview по-прежнему строим из lines.
-            if total_ch > 1 or copies > 1 or (
-                    self._items and len(self._items) > 1):
+            if total_ch > 1 or copies > 1 or (self._items and len(self._items) > 1):
                 preview = _lines_to_preview(lines)
-
-            # Оставляем legacy-кэш совместимости на переходный этап
-            self._chunks_cache = None
 
             self._update_chunk_nav(total_ch, self.chunk_index)
 
-            # Label
             label = self._preview_label or ""
             if total_ch > 1:
-                label = (f"{label} — часть "
-                         f"{self.chunk_index + 1}/{total_ch}")
+                label = f"{label} — часть {self.chunk_index + 1}/{total_ch}"
             else:
                 label = f"Напечатается: {label}"
             if copies > 1:
                 label += f" (×{copies})"
-            self.root.after(0,
-                lambda l=label: self.will_print_lbl.config(text=l))
+
+            self.root.after(
+                0,
+                lambda l=label: self.will_print_lbl.config(text=l)
+            )
 
             self.current_lines = lines
-
-            if self._document_layout is not None:
-                # Feed уже встроен в каждый item, не добавляем его ещё раз к чанку.
-                self.current_preview = preview
-            else:
-                from funnyprint.imaging import add_feed_preview
-                self.current_preview = add_feed_preview(preview, feed)
-
+            self.current_preview = preview
             self._show_preview(self.current_preview)
-            self.loading_lbl.config(text="")
+
+            if revision == self._preview_revision:
+                self.root.after(0, lambda: self.loading_lbl.config(text=""))
 
         except ValueError as e:
             self.log(f"Ошибка данных: {e}")
-            self.canvas.delete("all")
+            self.root.after(0, self.canvas.delete, "all")
             self.current_lines = None
-            self.loading_lbl.config(text="")
+            self.root.after(0, lambda: self.loading_lbl.config(text=""))
         except Exception as e:
             self.log(f"Ошибка предпросмотра: {e}")
-            self.loading_lbl.config(text="")
+            self.root.after(0, lambda: self.loading_lbl.config(text=""))
 
     # ── Хелперы превью ──
 
@@ -1198,7 +1316,7 @@ class App:
             self._show_chunk()
 
     def _show_chunk(self):
-        """Быстрое переключение чанка без полного перерендера документа."""
+        """Переключение чанка через кэш и очередь рендера."""
         if not self._document_layout:
             self._start_preview()
             return
@@ -1212,12 +1330,12 @@ class App:
         if self.chunk_index < 0:
             self.chunk_index = 0
 
-        lines = self._document_layout.assemble_chunk_lines(self.chunk_index)
-        from funnyprint.imaging import _lines_to_preview
-        preview = _lines_to_preview(lines)
-        self.current_lines = lines
-        self.current_preview = preview
-        self._show_preview(self.current_preview)
+        session = self.service.document_session
+        use_session_preview = (
+            session is not None
+            and session.source_type in ("batch_images", "pdf")
+        )
+
         self._update_chunk_nav(total, self.chunk_index)
 
         copies = self._safe_int(self.copies_var, 1)
@@ -1229,6 +1347,31 @@ class App:
         if copies > 1:
             label += f" (×{copies})"
         self.root.after(0, lambda l=label: self.will_print_lbl.config(text=l))
+
+        if use_session_preview:
+            if session.has_chunk_preview(self.chunk_index):
+                lines = session.get_chunk_lines(self.chunk_index)
+                preview = session.get_chunk_preview(self.chunk_index)
+                self.current_lines = lines
+                self.current_preview = preview
+                self._show_preview(preview)
+                self.loading_lbl.config(text="")
+            else:
+                queue_len = len(self._queued_chunk_renders)
+                self.loading_lbl.config(
+                    text=f"Рендер части {self.chunk_index + 1}/{total}... | В очереди: {queue_len}"
+                )
+                self._request_chunk_render(self.chunk_index, priority=0)
+            return
+
+        # Legacy path
+        lines = self._document_layout.assemble_chunk_lines(self.chunk_index)
+        from funnyprint.imaging import _lines_to_preview
+        preview = _lines_to_preview(lines)
+        self.current_lines = lines
+        self.current_preview = preview
+        self._show_preview(self.current_preview)
+        self.loading_lbl.config(text="")
 
     def _update_chunk_nav(self, total, current):
         self.total_chunks = total
@@ -1640,6 +1783,10 @@ class App:
                 future.result(timeout=2)
             except Exception:
                 pass
+        try:
+            self._render_queue.stop()
+        except Exception:
+            pass
         self.service.stop()
         self.root.destroy()
 

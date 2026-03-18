@@ -220,3 +220,52 @@ def assemble_chunk_lines(items: Sequence[Sequence[bytes]],
         raise ValueError(f"Unknown segment kind: {seg.kind}")
 
     return result
+
+
+@dataclass
+class VirtualDocumentLayout:
+    """Layout-документ по оценочным длинам item'ов.
+
+    Используется для lazy rendering:
+    - сначала строим карту чанков по длинам
+    - реальные lines рендерим только по запросу чанка
+    """
+    item_lengths: List[int]
+    settings: LayoutSettings
+    _sequence: list[Segment] = field(default_factory=list)
+    _chunks: list[ChunkDescriptor] = field(default_factory=list)
+
+    def rebuild(self):
+        sequence: list[Segment] = []
+        copies = max(1, int(self.settings.copies))
+
+        for _copy_idx in range(copies):
+            for item_index, item_len in enumerate(self.item_lengths):
+                if item_len > 0:
+                    sequence.append(
+                        Segment(
+                            kind="item",
+                            item_index=item_index,
+                            start=0,
+                            length=item_len,
+                        )
+                    )
+
+        self._sequence = sequence
+        self._chunks = build_chunk_descriptors(self._sequence)
+
+    @property
+    def chunk_count(self) -> int:
+        return len(self._chunks) if self._chunks else 1
+
+    @property
+    def chunks(self) -> Sequence[ChunkDescriptor]:
+        return self._chunks
+
+    def get_chunk(self, chunk_index: int) -> ChunkDescriptor:
+        if not self._chunks:
+            self.rebuild()
+        if not self._chunks:
+            return ChunkDescriptor(index=0, segments=tuple(), total_lines=0)
+        idx = min(max(0, chunk_index), len(self._chunks) - 1)
+        return self._chunks[idx]
