@@ -225,12 +225,7 @@ class App:
                         self.will_print_lbl.config(text=label)
 
                     queue_len = len(self._queued_chunk_renders)
-                    if queue_len > 0:
-                        self.loading_lbl.config(
-                            text=f"Готово чанков: {total_ready}/{total_chunks} | В очереди: {queue_len}"
-                        )
-                    else:
-                        self.loading_lbl.config(text="")
+                    self._update_render_progress(total_ready, total_chunks, queue_len)
 
                 self.root.after(0, _apply)
             finally:
@@ -724,6 +719,11 @@ class App:
 
         self.size_lbl = ttk.Label(right, text="", foreground="gray")
         self.size_lbl.pack()
+
+        self.render_progress = ttk.Progressbar(
+            right, orient=tk.HORIZONTAL, mode="determinate", maximum=100)
+        self.render_progress.pack(fill=tk.X, pady=(2, 0))
+
         self.loading_lbl = ttk.Label(
             right, text="", foreground="orange",
             font=("Arial", 10, "bold"))
@@ -856,11 +856,41 @@ class App:
     def _schedule(self):
         if self._update_timer:
             self.root.after_cancel(self._update_timer)
+
+        try:
+            self._render_queue.clear()
+            self._queued_chunk_renders.clear()
+        except Exception:
+            pass
+
         tab = self._get_tab()
         self._document_layout = None
         self._preview_revision += 1
+
+        # Не очищаем текущий preview/лейблы сразу:
+        # пользователь видит старую версию, пока новая не готова.
+        self.loading_lbl.config(text="Обновление предпросмотра...")
+
         delay = 800 if tab in (4, 5) else 300
         self._update_timer = self.root.after(delay, self._start_preview)
+
+    def _update_render_progress(self, ready, total, queue_len=0):
+        total = max(1, total)
+        pct = int(100 * ready / total)
+
+        def _do():
+            self.render_progress["value"] = pct
+
+            # Не затираем полезный loading/status, если сейчас идёт подготовка
+            if queue_len > 0:
+                self.loading_lbl.config(
+                    text=f"Готово чанков: {ready}/{total} | В очереди: {queue_len}"
+                )
+            elif ready < total:
+                self.loading_lbl.config(text=f"Готово чанков: {ready}/{total}")
+            else:
+                self.loading_lbl.config(text="")
+        self.root.after(0, _do)
 
     def _safe_int(self, var, default=0):
         try:
@@ -920,7 +950,9 @@ class App:
 
     def _preview_done(self):
         self._preview_busy = False
-        self.loading_lbl.config(text="")
+        if not self._queued_chunk_renders:
+            # Если текущий чанк уже обновился, loading_lbl позже сам очистится
+            pass
 
     def _update_preview(self, revision=None):
         self._update_timer = None
@@ -991,12 +1023,7 @@ class App:
 
                 queue_len = len(self._queued_chunk_renders)
                 ready = self.service.document_session.count_warmed_chunks()
-                self.root.after(
-                    0,
-                    lambda q=queue_len, r=ready, t=total_ch: self.loading_lbl.config(
-                        text=f"Готово чанков: {r}/{t} | В очереди: {q}"
-                    ) if q > 0 else self.loading_lbl.config(text="")
-                )
+                self._update_render_progress(ready, total_ch, queue_len)
 
                 if revision == self._preview_revision:
                     self.root.after(0, lambda: self.loading_lbl.config(text=""))
@@ -1071,6 +1098,8 @@ class App:
         def _do():
             self.canvas.delete("all")
             self.size_lbl.config(text="")
+            self.render_progress["value"] = 0
+            self.loading_lbl.config(text="")
             self.will_print_lbl.config(text=f"Напечатается: {msg}")
         self.current_lines = None
         self._document_layout = None
@@ -1358,6 +1387,8 @@ class App:
                 self.loading_lbl.config(text="")
             else:
                 queue_len = len(self._queued_chunk_renders)
+                ready = session.count_warmed_chunks()
+                self._update_render_progress(ready, total, queue_len)
                 self.loading_lbl.config(
                     text=f"Рендер части {self.chunk_index + 1}/{total}... | В очереди: {queue_len}"
                 )
